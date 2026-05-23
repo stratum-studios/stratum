@@ -1,3 +1,5 @@
+Lighting fixes at door and chunk edges, desert biome now generates properly, doors match the type placed, shift–quick-move flicker fix, creative item names on the slot, Debug/profiler tab removed, sheep texture cleanup; removing flicker.
+
 - Fixed block and sky light refreshing in too small an area at world chunk boundary.
 - Fixed wrong or stuck light near doors and chunk edges until a large area had updated
 - Opening or closing a door forces a proper light refresh around it

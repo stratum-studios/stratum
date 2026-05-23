@@ -48,6 +48,10 @@ import {
 import { chunkPerfLog, chunkPerfNow } from "../../debug/chunkPerf";
 import { withPerfSpan } from "../../debug/perfSpans";
 import { getTorchBloomGradientTexture } from "../torchBloomGradientTexture";
+import {
+  deferGpuBufferDestroy,
+  flushGpuBufferDestroysNow,
+} from "../gpuBufferDestroyDeferral";
 import { getVideoPrefs } from "../../ui/settings/videoPrefs";
 
 type ChunkMeshes = {
@@ -172,8 +176,8 @@ export class ChunkRenderer {
     if (prev !== null) {
       layer.removeChild(prev);
       meshes.fgTorchBloom = null;
-      // Match meshGeometryReuse / chunk unload: defer so WebGPU submit cannot reference freed buffers.
-      queueMicrotask(() => {
+      // Match meshGeometryReuse / gpuBufferDestroyDeferral (microtasks race WebGPU submit).
+      deferGpuBufferDestroy(() => {
         prev.destroy();
       });
     }
@@ -433,7 +437,7 @@ export class ChunkRenderer {
     }
     if (chunkMeshesPendingDestroy.length > 0) {
       const batch = chunkMeshesPendingDestroy;
-      queueMicrotask(() => {
+      deferGpuBufferDestroy(() => {
         for (const { bg, fgShadow, fgTorchBloom, fg, leafDeco, fgWater } of batch) {
           bg.destroy();
           fgShadow.destroy();
@@ -579,6 +583,7 @@ export class ChunkRenderer {
   }
 
   destroy(): void {
+    flushGpuBufferDestroysNow();
     this._windyForegroundMeshes.clear();
     this._furnaceFireForegroundMeshes.clear();
     this._wateryForegroundMeshes.clear();

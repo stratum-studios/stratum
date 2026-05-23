@@ -191,3 +191,145 @@ export function applyCommittedBreakOnWorld(
   }
   return true;
 }
+
+/**
+ * Foreground break for TNT-style explosions: `dropsLoot` is precomputed (explosion decay roll).
+ * Does not affect background layer.
+ */
+export function applyExplosionForegroundBreak(
+  world: World,
+  registry: BlockRegistry,
+  wx: number,
+  wy: number,
+  airId: number,
+  gameMode: WorldGameMode,
+  dropsLoot: boolean,
+): boolean {
+  const canBreakUnbreakable = gameMode === "sandbox";
+  const sandboxNoDrops = gameMode === "sandbox";
+  const cell = world.getBlock(wx, wy);
+  const def = cell;
+  if (def.id === airId || (def.hardness === 999 && !canBreakUnbreakable)) {
+    return false;
+  }
+
+  const wildTreeLogColumn =
+    isTreeLogBlock(registry, def.id) &&
+    (world.getMetadata(wx, wy) & WORLDGEN_NO_COLLIDE) !== 0;
+
+  const rollDrops = dropsLoot && !sandboxNoDrops;
+
+  if (def.tallGrass === "bottom" || def.tallGrass === "top") {
+    const bottomWy = def.tallGrass === "bottom" ? wy : wy - 1;
+    const topWy = bottomWy + 1;
+    const bottomOk = bottomWy >= WORLD_Y_MIN && bottomWy <= WORLD_Y_MAX;
+    const topOk = topWy >= WORLD_Y_MIN && topWy <= WORLD_Y_MAX;
+    const bottomCell = bottomOk ? world.getBlock(wx, bottomWy) : null;
+    const topCell = topOk ? world.getBlock(wx, topWy) : null;
+    const fullPlant =
+      bottomCell !== null &&
+      bottomCell.tallGrass === "bottom" &&
+      topCell !== null &&
+      topCell.tallGrass === "top";
+
+    if (fullPlant && bottomCell !== null) {
+      if (rollDrops) {
+        world.spawnLootForBrokenBlock(bottomCell.id, wx, bottomWy);
+      }
+      world.setBlock(wx, topWy, 0);
+      world.setBlock(wx, bottomWy, 0);
+    } else {
+      if (rollDrops) {
+        world.spawnLootForBrokenBlock(def.id, wx, wy);
+      }
+      world.setBlock(wx, wy, 0);
+    }
+    return true;
+  }
+
+  if (def.doorHalf === "bottom" || def.doorHalf === "top") {
+    const bottomWy = def.doorHalf === "bottom" ? wy : wy - 1;
+    const topWy = bottomWy + 1;
+    const bottomOk = bottomWy >= WORLD_Y_MIN && bottomWy <= WORLD_Y_MAX;
+    const topOk = topWy >= WORLD_Y_MIN && topWy <= WORLD_Y_MAX;
+    const bottomCell = bottomOk ? world.getBlock(wx, bottomWy) : null;
+    const topCell = topOk ? world.getBlock(wx, topWy) : null;
+    const fullDoor =
+      bottomCell !== null &&
+      bottomCell.doorHalf === "bottom" &&
+      topCell !== null &&
+      topCell.doorHalf === "top";
+
+    if (fullDoor && bottomCell !== null) {
+      if (rollDrops) {
+        world.spawnLootForBrokenBlock(bottomCell.id, wx, bottomWy);
+      }
+      world.setBlock(wx, topWy, 0);
+      world.setBlock(wx, bottomWy, 0);
+    } else {
+      if (rollDrops) {
+        world.spawnLootForBrokenBlock(def.id, wx, wy);
+      }
+      world.setBlock(wx, wy, 0);
+    }
+    return true;
+  }
+
+  if (def.bedHalf === "foot" || def.bedHalf === "head") {
+    const meta = world.getMetadata(wx, wy);
+    const headPlusX = bedHeadPlusXFromMeta(meta);
+    const footWx = def.bedHalf === "foot" ? wx : headPlusX ? wx - 1 : wx + 1;
+    const headWx = def.bedHalf === "head" ? wx : headPlusX ? wx + 1 : wx - 1;
+    const footCell = world.getBlock(footWx, wy);
+    const headCell = world.getBlock(headWx, wy);
+    const fullBed =
+      footCell.bedHalf === "foot" && headCell.bedHalf === "head";
+
+    if (fullBed) {
+      if (rollDrops) {
+        world.spawnLootForBrokenBlock(footCell.id, footWx, wy);
+      }
+      world.setBlock(headWx, wy, 0);
+      world.setBlock(footWx, wy, 0);
+    } else {
+      if (rollDrops) {
+        world.spawnLootForBrokenBlock(def.id, wx, wy);
+      }
+      world.setBlock(wx, wy, 0);
+    }
+    return true;
+  }
+
+  if (def.isPainting === true) {
+    const pmeta = world.getMetadata(wx, wy);
+    const decoded = decodePaintingMeta(pmeta);
+    const pv = PAINTING_VARIANTS[decoded.variantIndex]!;
+    const anchorX = wx - decoded.offsetX;
+    const anchorY = wy - decoded.offsetY;
+    if (rollDrops) {
+      world.spawnLootForBrokenBlock(def.id, anchorX, anchorY);
+    }
+    for (let oy = 0; oy < pv.height; oy++) {
+      for (let ox = 0; ox < pv.width; ox++) {
+        world.setBlock(anchorX + ox, anchorY + oy, 0);
+      }
+    }
+    return true;
+  }
+
+  if (def.identifier === "stratum:furnace" && !sandboxNoDrops) {
+    world.spawnFurnaceItemDropsAt(wx, wy);
+  }
+  if (def.identifier === "stratum:chest" || def.identifier === "stratum:barrel") {
+    world.destroyChestForPlayerBreak(wx, wy, rollDrops);
+  } else {
+    if (rollDrops) {
+      world.spawnLootForBrokenBlock(def.id, wx, wy);
+    }
+    world.setBlock(wx, wy, 0);
+  }
+  if (wildTreeLogColumn) {
+    breakTreeLogsAboveColumn(world, registry, wx, wy, airId, undefined, sandboxNoDrops);
+  }
+  return true;
+}

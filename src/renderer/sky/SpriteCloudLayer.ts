@@ -438,20 +438,27 @@ export class SpriteCloudLayer {
     ).resource?.source ?? null;
   }
 
+  /**
+   * Feather left/right strip edges for seamless horizontal tiling.
+   * Older path used a **binary** Bayer threshold (full erase vs keep), which scales up to
+   * obvious speckle/banding with {@link CLOUD_VISUAL_SCALE} on a smooth sky and reads like bad
+   * bloom near bright foreground. We keep a mild dither **nudge** on a smooth quadratic falloff
+   * so wrap seams stay irregular without harsh 0/α pixels.
+   */
   private applyDitheredHorizontalCut(
     pixels: Uint8ClampedArray,
     width: number,
     height: number,
   ): void {
     const edgePhase = Math.random() * 1000;
-    const featherBase = Math.max(3, Math.round(width * 0.03));
-    const featherVar = Math.max(2, Math.round(width * 0.02));
+    const featherBase = Math.max(5, Math.round(width * 0.042));
+    const featherVar = Math.max(3, Math.round(width * 0.028));
     for (let y = 0; y < height; y++) {
       const wobble = (Math.sin((y + edgePhase) * 0.18) + 1) * 0.5;
-      const feather = Math.max(1, featherBase + Math.round(wobble * featherVar));
+      const feather = Math.max(2, featherBase + Math.round(wobble * featherVar));
       for (let x = 0; x < width; x++) {
         const p = (y * width + x) * 4;
-        const a = pixels[p + 3];
+        const a = pixels[p + 3] ?? 0;
         if (a === 0) {
           continue;
         }
@@ -461,9 +468,10 @@ export class SpriteCloudLayer {
         }
         const t = edge / feather;
         const threshold = (DITHER_4X4[y & 3]![x & 3]! + 0.5) / 16;
-        if (t < threshold) {
-          pixels[p + 3] = 0;
-        }
+        const roll = clamp01((t - 0.05) / 0.95);
+        const dither = (threshold - 0.5) * 0.18;
+        const keep = clamp01(roll * roll + dither);
+        pixels[p + 3] = Math.round(a * keep);
       }
     }
   }

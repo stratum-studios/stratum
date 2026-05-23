@@ -88,6 +88,19 @@ export class BlockRegistry {
     return h === "bottom" || h === "top";
   }
 
+  /** Used for sky light through back-wall windows (`material: glass`). Id 0 is never glass. */
+  isGlassMaterial(id: number): boolean {
+    return this.byId[id]?.material === "glass";
+  }
+
+  /**
+   * Solid foreground may pass skylight when the cell has no back-wall (hole / open to backdrop)
+   * or a glass back-wall tile — matches how players cut windows in the bg layer.
+   */
+  backWallAllowsSkylightThroughSolidForeground(bgId: number): boolean {
+    return bgId === 0 || this.isGlassMaterial(bgId);
+  }
+
   /**
    * Foreground blocks that cast orthographic contact-shadow strips on adjacent background tiles.
    * False for air, non-solid, solid transparent cells, and any block that sets

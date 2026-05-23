@@ -94,6 +94,7 @@ import {
   SUB_PAINTING,
   SUB_SIMPLE_FG,
   SUB_TALL_GRASS,
+  SUB_TNT_PRIME,
   SUB_WHEAT,
 } from "../world/terrain/terrainHostPlace";
 import {
@@ -638,6 +639,10 @@ export class Player {
       this.state.temporaryHealthRemainSec = 0;
       this.state.damageTintRemainSec = 0;
     }
+  }
+
+  isSandboxMode(): boolean {
+    return this._gameMode === "sandbox";
   }
 
   private consumeOneFromHotbarForUse(hotbarSlot: number): boolean {
@@ -1873,6 +1878,7 @@ export class Player {
         useTargetCell.identifier === "stratum:stonecutter" ||
         useTargetCell.identifier === "stratum:furnace" ||
         useTargetCell.identifier === "stratum:spawner" ||
+        useTargetCell.identifier === "stratum:tnt" ||
         world.isSignBlockId(useTargetCell.id) ||
         useTargetCell.bedHalf === "foot" ||
         useTargetCell.bedHalf === "head");
@@ -1944,6 +1950,14 @@ export class Player {
             wx,
             wy,
           } satisfies GameEvent);
+        } else if (cell.identifier === "stratum:tnt") {
+          const hotbarSlotInv = state.hotbarSlot % HOTBAR_SIZE;
+          if (this._mpTerrainClient) {
+            this.emitNetPlace(SUB_TNT_PRIME, wx, wy, hotbarSlotInv, 0, 0);
+          } else if (world.setBlock(wx, wy, this.airId)) {
+            world.spawnPrimedTnt((wx + 0.5) * BLOCK_SIZE, (wy + 0.5) * BLOCK_SIZE, 0, 0);
+          }
+          this.startHandSwingVisual();
         } else if (cell.doorHalf === "bottom" || cell.doorHalf === "top") {
           const bottomWy = cell.doorHalf === "bottom" ? wy : wy - 1;
           const b = world.getBlock(wx, bottomWy);
@@ -2028,6 +2042,15 @@ export class Player {
             wy,
           } satisfies GameEvent);
           placeHandled = true;
+        } else if (cell.identifier === "stratum:tnt") {
+          const hotbarSlotTnt = state.hotbarSlot % HOTBAR_SIZE;
+          if (this._mpTerrainClient) {
+            this.emitNetPlace(SUB_TNT_PRIME, wx, wy, hotbarSlotTnt, 0, 0);
+          } else if (world.setBlock(wx, wy, this.airId)) {
+            world.spawnPrimedTnt((wx + 0.5) * BLOCK_SIZE, (wy + 0.5) * BLOCK_SIZE, 0, 0);
+          }
+          placeHandled = true;
+          this.startHandSwingVisual();
         }
       }
       if (!placeHandled && input.isJustPressed("place") && !state.backgroundEditMode) {

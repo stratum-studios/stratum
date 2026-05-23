@@ -8,6 +8,10 @@ import type { CachedMod } from "../mods/workshopTypes";
 import type { IndexedDBStore } from "../persistence/IndexedDBStore";
 import type { SaveGame } from "../persistence/SaveGame";
 import { blurFocusContainedBy } from "./blurOverlayFocus";
+import {
+  sampleGamepadMenuEdges,
+  tickGamepadRovingFocus,
+} from "./MenuGamepadNavigator";
 import { HUD } from "./screens/HUD";
 import { PauseMenu } from "./screens/PauseMenu";
 
@@ -23,6 +27,7 @@ export class UIShell {
   private deathOverlay: HTMLDivElement | null = null;
   private crashOverlay: HTMLDivElement | null = null;
   private crashShown = false;
+  private readonly deathGamepadFocusIdx = { i: 0 };
 
   constructor(
     bus: EventBus,
@@ -304,6 +309,19 @@ export class UIShell {
     });
   }
 
+  tickPauseGamepad(bus: EventBus): void {
+    this.pauseMenu.tickGamepad(bus);
+  }
+
+  tickDeathGamepad(_bus: EventBus): void {
+    const el = this.deathOverlay;
+    if (el === null || !el.classList.contains("stratum-death-overlay--open")) {
+      return;
+    }
+    const edges = sampleGamepadMenuEdges();
+    tickGamepadRovingFocus(el, this.deathGamepadFocusIdx, edges);
+  }
+
   /** Full-screen pause overlay (Escape). */
   setPauseOverlayOpen(open: boolean): void {
     this.pauseMenu.setOpen(open);
@@ -320,6 +338,11 @@ export class UIShell {
     }
     el.classList.toggle("stratum-death-overlay--open", open);
     el.setAttribute("aria-hidden", open ? "false" : "true");
+    if (open) {
+      queueMicrotask(() => {
+        (el.querySelector("button") as HTMLButtonElement | null)?.focus();
+      });
+    }
   }
 
   destroy(): void {

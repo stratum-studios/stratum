@@ -129,6 +129,7 @@
     "ladder": "assets/mods/resource_packs/stratum-core/textures/tiles/ladder.png",
     "oak_sign": "assets/mods/resource_packs/stratum-core/textures/tiles/oak_sign.png",
     "spruce_sign": "assets/mods/resource_packs/stratum-core/textures/tiles/spruce_sign.png",
-    "birch_sign": "assets/mods/resource_packs/stratum-core/textures/tiles/birch_sign.png"
+    "birch_sign": "assets/mods/resource_packs/stratum-core/textures/tiles/birch_sign.png",
+    "tnt": "assets/mods/resource_packs/stratum-core/textures/tiles/tnt.png"
   }
 }

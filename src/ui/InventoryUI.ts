@@ -18,6 +18,15 @@ import {
 import type { ItemDefinition, ItemId, ItemStack } from "../core/itemDefinition";
 import { getMeleeStatsForSwordOrAxeTooltip } from "../core/meleeWeaponStats";
 import { formatKeyCode, keyCodeToInputPromptGlyph } from "../input/bindings";
+import {
+  applyAxisDeadzone,
+  GAMEPAD_TRIGGER_PRESS,
+  pickPrimaryGamepad,
+  readButtonPressed,
+  readButtonValue,
+  readTrigger01,
+  StdBtn,
+} from "../input/gamepadStandard";
 import type { ItemRegistry } from "../items/ItemRegistry";
 import type { ArmorSlot, PlayerInventory } from "../items/PlayerInventory";
 import { fetchItemIconUrlMapForRegistry } from "../core/textureManifest";
@@ -116,6 +125,17 @@ export class InventoryUI {
   private creativeTooltipActive = false;
   private inventoryOpen = false;
   private overlayDirty = true;
+
+  private readonly invGamepadCursorEl: HTMLDivElement;
+  private invGpCursorClientX = 0;
+  private invGpCursorClientY = 0;
+  private invGpPrevA = false;
+  private invGpPrevRt = 0;
+  private invGpPrevDl = false;
+  private invGpPrevDr = false;
+  private invGpPrevDu = false;
+  private invGpPrevDd = false;
+  private invGpDpadHoldT = 0;
 
   private prevHotbarSlotForLabel = -1;
   private prevHotbarSelectionKey = "";
@@ -794,6 +814,12 @@ export class InventoryUI {
     overlayRow.appendChild(creativeMount);
     overlayRow.appendChild(craftingMount);
     overlay.appendChild(overlayRow);
+    const gpCursor = document.createElement("div");
+    gpCursor.className = "inv-gamepad-cursor";
+    gpCursor.style.display = "none";
+    overlay.appendChild(gpCursor);
+    this.invGamepadCursorEl = gpCursor;
+
     root.appendChild(overlay);
     this.overlay = overlay;
     this.overlayRowEl = overlayRow;
@@ -985,12 +1011,23 @@ export class InventoryUI {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           this.syncInvSidePanelMaxHeight();
+          const br = this.overlay.getBoundingClientRect();
+          this.invGpCursorClientX = br.left + br.width * 0.5;
+          this.invGpCursorClientY = br.top + br.height * 0.45;
+          this.invGpDpadHoldT = 0;
+          this.invGpPrevA = false;
+          this.invGpPrevRt = 0;
+          this.invGpPrevDl = false;
+          this.invGpPrevDr = false;
+          this.invGpPrevDu = false;
+          this.invGpPrevDd = false;
         });
       });
     } else {
       this.overlay.classList.remove("inv-overlay--open");
       this.overlay.setAttribute("aria-hidden", "true");
       this.root.classList.remove("inv-root--open");
+      this.invGamepadCursorEl.style.display = "none";
     }
   }
 
@@ -1451,6 +1488,131 @@ export class InventoryUI {
     );
 
     this.layerModeStatusTextEl.textContent = active ? "background" : "foreground";
+  }
+
+  /** Gamepad: virtual cursor; A = pick/swap like LMB, RT edge = RMB slot action. */
+  tickGamepadInventory(dtSec: number): void {
+    if (!this.inventoryOpen) {
+      return;
+    }
+    const gp = pickPrimaryGamepad();
+    if (gp === null) {
+      this.invGamepadCursorEl.style.display = "none";
+      return;
+    }
+
+    this.invGamepadCursorEl.style.display = "block";
+
+    const speed = 440 * dtSec;
+    const rsx = applyAxisDeadzone(gp.axes[2] ?? 0, 0.16);
+    const rsy = applyAxisDeadzone(gp.axes[3] ?? 0, 0.16);
+    this.invGpCursorClientX += rsx * speed;
+    this.invGpCursorClientY += rsy * speed;
+
+    const dl = readButtonPressed(gp, StdBtn.DLeft);
+    const dr = readButtonPressed(gp, StdBtn.DRight);
+    const du = readButtonPressed(gp, StdBtn.DUp);
+    const dd = readButtonPressed(gp, StdBtn.DDown);
+    const nudge = 20;
+    let dpadEdge = false;
+    if (dl && !this.invGpPrevDl) {
+      this.invGpCursorClientX -= nudge;
+      dpadEdge = true;
+    }
+    if (dr && !this.invGpPrevDr) {
+      this.invGpCursorClientX += nudge;
+      dpadEdge = true;
+    }
+    if (du && !this.invGpPrevDu) {
+      this.invGpCursorClientY -= nudge;
+      dpadEdge = true;
+    }
+    if (dd && !this.invGpPrevDd) {
+      this.invGpCursorClientY += nudge;
+      dpadEdge = true;
+    }
+    this.invGpPrevDl = dl;
+    this.invGpPrevDr = dr;
+    this.invGpPrevDu = du;
+    this.invGpPrevDd = dd;
+
+    if (dl || dr || du || dd) {
+      this.invGpDpadHoldT += dtSec;
+    } else {
+      this.invGpDpadHoldT = 0;
+    }
+    const repAfter = 0.28;
+    const repEvery = 0.1;
+    if (!dpadEdge && (dl || dr || du || dd) && this.invGpDpadHoldT > repAfter) {
+      const phase = this.invGpDpadHoldT - repAfter;
+      const prevN = Math.floor((phase - dtSec) / repEvery);
+      const curN = Math.floor(phase / repEvery);
+      if (curN > prevN) {
+        const step = nudge * 0.85;
+        if (dl) {
+          this.invGpCursorClientX -= step;
+        }
+        if (dr) {
+          this.invGpCursorClientX += step;
+        }
+        if (du) {
+          this.invGpCursorClientY -= step;
+        }
+        if (dd) {
+          this.invGpCursorClientY += step;
+        }
+      }
+    }
+
+    const pad = 6;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    this.invGpCursorClientX = Math.max(pad, Math.min(vw - pad, this.invGpCursorClientX));
+    this.invGpCursorClientY = Math.max(pad, Math.min(vh - pad, this.invGpCursorClientY));
+
+    this.invGamepadCursorEl.style.left = `${this.invGpCursorClientX}px`;
+    this.invGamepadCursorEl.style.top = `${this.invGpCursorClientY}px`;
+
+    const aNow = readButtonValue(gp, StdBtn.A) >= 0.5;
+    const aEdge = aNow && !this.invGpPrevA;
+    this.invGpPrevA = aNow;
+    if (aEdge) {
+      this.synthInvSlotMouseDownUp(0);
+    }
+
+    const rt = readTrigger01(gp, StdBtn.RT);
+    const rtEdge = rt >= GAMEPAD_TRIGGER_PRESS && this.invGpPrevRt < GAMEPAD_TRIGGER_PRESS;
+    this.invGpPrevRt = rt;
+    if (rtEdge) {
+      this.synthInvSlotMouseDownUp(2);
+    }
+  }
+
+  /** Inventory slots rely on mousedown + window mouseup; synthesize that pair. */
+  private synthInvSlotMouseDownUp(button: 0 | 2): void {
+    const cx = this.invGpCursorClientX;
+    const cy = this.invGpCursorClientY;
+    const raw = document.elementFromPoint(cx, cy);
+    const el = raw?.closest(".inv-slot");
+    if (!(el instanceof HTMLElement)) {
+      return;
+    }
+    const evInit: MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: cx,
+      clientY: cy,
+      button,
+      buttons: button === 0 ? 1 : 2,
+    };
+    el.dispatchEvent(new MouseEvent("mousedown", evInit));
+    el.dispatchEvent(
+      new MouseEvent("mouseup", {
+        ...evInit,
+        buttons: 0,
+      }),
+    );
   }
 
   destroy(): void {

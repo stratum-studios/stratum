@@ -1277,6 +1277,25 @@
   pointer-events: auto;
 }
 
+/* Gamepad virtual pointer over inventory (pointer-events none so hit-testing reaches slots). */
+#inventory-ui-root .inv-gamepad-cursor {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
+  margin-top: -11px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  border-radius: 4px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 2px 10px rgba(0, 0, 0, 0.35);
+  background: rgba(94, 201, 110, 0.22);
+  pointer-events: none;
+  z-index: 500;
+}
+
 #inventory-ui-root .inv-panel {
   flex: 0 1 auto;
   align-self: flex-start;

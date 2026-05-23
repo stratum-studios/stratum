@@ -102,6 +102,16 @@ export enum MessageType {
   PLAYER_HIT_REQUEST = 0x2c,
   /** Host → one client: authoritative teleport to feet world coordinates. */
   PLAYER_TELEPORT = 0x2d,
+  /** Host → clients: primed TNT entity spawned. */
+  PRIMED_TNT_SPAWN = 0x2e,
+  /** Host → clients: primed TNT pose/fuse sync. */
+  PRIMED_TNT_SYNC = 0x2f,
+  /** Host → clients: primed TNT removed (exploded). */
+  PRIMED_TNT_DESPAWN = 0x30,
+  /** Client → host: punch primed TNT for knockback. */
+  TNT_PUNCH_REQUEST = 0x31,
+  /** Host → clients: net arrow embedded in mob (matches host stickToMob). */
+  ARROW_MOB_STICK = 0x32,
 }
 
 /** Back-compat alias used across the codebase. */
@@ -439,6 +449,9 @@ export type EntityDespawnMsg = {
 export const ENTITY_STATE_FLAG_SLIME_ON_GROUND = 1 << 6;
 export const ENTITY_STATE_FLAG_SLIME_JUMP_PRIMING = 1 << 7;
 
+/** Wire id for {@link MobType.Slime} — trailing ENTITY_STATE blob uses this to decode slime stuck items. */
+export const ENTITY_STATE_ENTITY_TYPE_SLIME = 5;
+
 export type EntityStateMsg = {
   type: MessageType.ENTITY_STATE;
   entityId: number;
@@ -453,6 +466,15 @@ export type EntityStateMsg = {
   woolColor?: number;
   /** Death pose time remaining in 10ms units (`0` = not dying). Absent if wire buffer has no byte at index 42. */
   deathAnim10Ms?: number;
+  /**
+   * Slime only (v10+ wire tail): items absorbed into the slime for client visuals.
+   * Each slot: uint32 itemId LE, uint8 count, uint16 damage LE (max 24 slots).
+   */
+  slimeStuckItems?: ReadonlyArray<{
+    itemId: number;
+    count: number;
+    damage: number;
+  }>;
 };
 
 export type EntityHitRequestMsg = {
@@ -571,6 +593,48 @@ export type ArrowSpawnMsg = {
   shooterFeetX: number;
 };
 
+export type ArrowMobStickMsg = {
+  type: MessageType.ARROW_MOB_STICK;
+  netArrowId: number;
+  mobId: number;
+  offsetX: number;
+  offsetY: number;
+  rotationRad: number;
+  mobFacingRight: boolean;
+};
+
+export type PrimedTntSpawnMsg = {
+  type: MessageType.PRIMED_TNT_SPAWN;
+  netPrimedId: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  fuseRemainSec: number;
+};
+
+export type PrimedTntSyncMsg = {
+  type: MessageType.PRIMED_TNT_SYNC;
+  netPrimedId: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  fuseRemainSec: number;
+};
+
+export type PrimedTntDespawnMsg = {
+  type: MessageType.PRIMED_TNT_DESPAWN;
+  netPrimedId: number;
+};
+
+export type TntPunchRequestMsg = {
+  type: MessageType.TNT_PUNCH_REQUEST;
+  netPrimedId: number;
+  /** +1 = punch from left (push +x), −1 from right. */
+  dirX: number;
+};
+
 /** Max custom skin PNG size on the wire (256 KB). */
 export const PLAYER_SKIN_DATA_MAX_BYTES = 256 * 1024;
 
@@ -623,7 +687,12 @@ export type NetworkMessage =
   | PlayerSkinDataMsg
   | MobHitFeedbackMsg
   | BowFireRequestMsg
-  | ArrowSpawnMsg;
+  | ArrowSpawnMsg
+  | ArrowMobStickMsg
+  | PrimedTntSpawnMsg
+  | PrimedTntSyncMsg
+  | PrimedTntDespawnMsg
+  | TntPunchRequestMsg;
 
 const LE = true;
 
@@ -1178,7 +1247,13 @@ export function encode(msg: NetworkMessage): ArrayBuffer {
     }
 
     case MessageType.ENTITY_STATE: {
-      const buf = new ArrayBuffer(43);
+      const stuck = msg.slimeStuckItems;
+      const slimeTailBytes =
+        msg.entityType === ENTITY_STATE_ENTITY_TYPE_SLIME
+          ? 1 +
+            (stuck !== undefined ? stuck.length : 0) * (4 + 1 + 2)
+          : 0;
+      const buf = new ArrayBuffer(43 + slimeTailBytes);
       const v = new DataView(buf);
       v.setUint8(0, MessageType.ENTITY_STATE);
       v.setUint32(1, msg.entityId >>> 0, LE);
@@ -1191,6 +1266,21 @@ export function encode(msg: NetworkMessage): ArrayBuffer {
       v.setUint8(40, msg.flags & 0xff);
       v.setUint8(41, (msg.woolColor !== undefined ? msg.woolColor : 0) & 0xff);
       v.setUint8(42, (msg.deathAnim10Ms !== undefined ? msg.deathAnim10Ms : 0) & 0xff);
+      if (msg.entityType === ENTITY_STATE_ENTITY_TYPE_SLIME) {
+        const list = stuck ?? [];
+        const n = Math.min(24, list.length);
+        v.setUint8(43, n);
+        let o = 44;
+        for (let i = 0; i < n; i++) {
+          const s = list[i]!;
+          v.setUint32(o, s.itemId >>> 0, LE);
+          o += 4;
+          v.setUint8(o, Math.min(255, Math.max(0, s.count | 0)));
+          o += 1;
+          v.setUint16(o, s.damage & 0xffff, LE);
+          o += 2;
+        }
+      }
       return buf;
     }
 
@@ -1388,6 +1478,62 @@ export function encode(msg: NetworkMessage): ArrayBuffer {
       view.setFloat64(29, msg.vy, LE);
       view.setFloat64(37, msg.damage, LE);
       view.setFloat64(45, msg.shooterFeetX, LE);
+      return buf;
+    }
+
+    case MessageType.ARROW_MOB_STICK: {
+      const buf = new ArrayBuffer(34);
+      const view = new DataView(buf);
+      view.setUint8(0, MessageType.ARROW_MOB_STICK);
+      view.setUint32(1, msg.netArrowId >>> 0, LE);
+      view.setUint32(5, msg.mobId >>> 0, LE);
+      view.setFloat64(9, msg.offsetX, LE);
+      view.setFloat64(17, msg.offsetY, LE);
+      view.setFloat64(25, msg.rotationRad, LE);
+      view.setUint8(33, msg.mobFacingRight ? 1 : 0);
+      return buf;
+    }
+
+    case MessageType.PRIMED_TNT_SPAWN: {
+      const buf = new ArrayBuffer(1 + 4 + 8 * 5);
+      const view = new DataView(buf);
+      view.setUint8(0, MessageType.PRIMED_TNT_SPAWN);
+      view.setUint32(1, msg.netPrimedId >>> 0, LE);
+      view.setFloat64(5, msg.x, LE);
+      view.setFloat64(13, msg.y, LE);
+      view.setFloat64(21, msg.vx, LE);
+      view.setFloat64(29, msg.vy, LE);
+      view.setFloat64(37, msg.fuseRemainSec, LE);
+      return buf;
+    }
+
+    case MessageType.PRIMED_TNT_SYNC: {
+      const buf = new ArrayBuffer(1 + 4 + 8 * 5);
+      const view = new DataView(buf);
+      view.setUint8(0, MessageType.PRIMED_TNT_SYNC);
+      view.setUint32(1, msg.netPrimedId >>> 0, LE);
+      view.setFloat64(5, msg.x, LE);
+      view.setFloat64(13, msg.y, LE);
+      view.setFloat64(21, msg.vx, LE);
+      view.setFloat64(29, msg.vy, LE);
+      view.setFloat64(37, msg.fuseRemainSec, LE);
+      return buf;
+    }
+
+    case MessageType.PRIMED_TNT_DESPAWN: {
+      const buf = new ArrayBuffer(1 + 4);
+      const view = new DataView(buf);
+      view.setUint8(0, MessageType.PRIMED_TNT_DESPAWN);
+      view.setUint32(1, msg.netPrimedId >>> 0, LE);
+      return buf;
+    }
+
+    case MessageType.TNT_PUNCH_REQUEST: {
+      const buf = new ArrayBuffer(1 + 4 + 1);
+      const view = new DataView(buf);
+      view.setUint8(0, MessageType.TNT_PUNCH_REQUEST);
+      view.setUint32(1, msg.netPrimedId >>> 0, LE);
+      view.setInt8(5, msg.dirX >= 0 ? 1 : -1);
       return buf;
     }
   }
@@ -1913,12 +2059,36 @@ export function decode(buf: ArrayBuffer): NetworkMessage {
       if (v.byteLength < 41) {
         throw new Error("ENTITY_STATE: buffer too short");
       }
+      const entityType = v.getUint16(5, LE);
       const woolColor = v.byteLength >= 43 ? v.getUint8(41) : 0;
       const deathAnim10Ms = v.byteLength >= 43 ? v.getUint8(42) : 0;
+      let slimeStuckItems:
+        | Array<{ itemId: number; count: number; damage: number }>
+        | undefined;
+      if (
+        entityType === ENTITY_STATE_ENTITY_TYPE_SLIME &&
+        v.byteLength >= 44
+      ) {
+        const n = Math.min(24, v.getUint8(43));
+        const need = 44 + n * 7;
+        if (v.byteLength < need) {
+          throw new Error("ENTITY_STATE: slime stuck tail truncated");
+        }
+        slimeStuckItems = [];
+        let o = 44;
+        for (let i = 0; i < n; i++) {
+          slimeStuckItems.push({
+            itemId: v.getUint32(o, LE),
+            count: v.getUint8(o + 4),
+            damage: v.getUint16(o + 5, LE),
+          });
+          o += 7;
+        }
+      }
       return {
         type: MessageType.ENTITY_STATE,
         entityId: v.getUint32(1, LE),
-        entityType: v.getUint16(5, LE),
+        entityType,
         x: v.getFloat64(7, LE),
         y: v.getFloat64(15, LE),
         vx: v.getFloat64(23, LE),
@@ -1927,6 +2097,7 @@ export function decode(buf: ArrayBuffer): NetworkMessage {
         flags: v.getUint8(40),
         woolColor,
         ...(deathAnim10Ms !== 0 ? { deathAnim10Ms } : {}),
+        ...(slimeStuckItems !== undefined ? { slimeStuckItems } : {}),
       };
     }
 
@@ -2196,6 +2367,72 @@ export function decode(buf: ArrayBuffer): NetworkMessage {
         vy: v.getFloat64(29, LE),
         damage: v.getFloat64(37, LE),
         shooterFeetX: v.getFloat64(45, LE),
+      };
+    }
+
+    case MessageType.ARROW_MOB_STICK: {
+      if (v.byteLength < 34) {
+        throw new Error("ARROW_MOB_STICK: buffer too short");
+      }
+      return {
+        type: MessageType.ARROW_MOB_STICK,
+        netArrowId: v.getUint32(1, LE),
+        mobId: v.getUint32(5, LE),
+        offsetX: v.getFloat64(9, LE),
+        offsetY: v.getFloat64(17, LE),
+        rotationRad: v.getFloat64(25, LE),
+        mobFacingRight: v.getUint8(33) !== 0,
+      };
+    }
+
+    case MessageType.PRIMED_TNT_SPAWN: {
+      if (v.byteLength < 45) {
+        throw new Error("PRIMED_TNT_SPAWN: buffer too short");
+      }
+      return {
+        type: MessageType.PRIMED_TNT_SPAWN,
+        netPrimedId: v.getUint32(1, LE),
+        x: v.getFloat64(5, LE),
+        y: v.getFloat64(13, LE),
+        vx: v.getFloat64(21, LE),
+        vy: v.getFloat64(29, LE),
+        fuseRemainSec: v.getFloat64(37, LE),
+      };
+    }
+
+    case MessageType.PRIMED_TNT_SYNC: {
+      if (v.byteLength < 45) {
+        throw new Error("PRIMED_TNT_SYNC: buffer too short");
+      }
+      return {
+        type: MessageType.PRIMED_TNT_SYNC,
+        netPrimedId: v.getUint32(1, LE),
+        x: v.getFloat64(5, LE),
+        y: v.getFloat64(13, LE),
+        vx: v.getFloat64(21, LE),
+        vy: v.getFloat64(29, LE),
+        fuseRemainSec: v.getFloat64(37, LE),
+      };
+    }
+
+    case MessageType.PRIMED_TNT_DESPAWN: {
+      if (v.byteLength < 5) {
+        throw new Error("PRIMED_TNT_DESPAWN: buffer too short");
+      }
+      return {
+        type: MessageType.PRIMED_TNT_DESPAWN,
+        netPrimedId: v.getUint32(1, LE),
+      };
+    }
+
+    case MessageType.TNT_PUNCH_REQUEST: {
+      if (v.byteLength < 6) {
+        throw new Error("TNT_PUNCH_REQUEST: buffer too short");
+      }
+      return {
+        type: MessageType.TNT_PUNCH_REQUEST,
+        netPrimedId: v.getUint32(1, LE),
+        dirX: v.getInt8(5),
       };
     }
 

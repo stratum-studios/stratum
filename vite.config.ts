@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { parse as parseJsonc } from "jsonc-parser";
 import type { Plugin } from "vite";
@@ -30,6 +30,20 @@ function emitBuildJsonPlugin(): Plugin {
         fileName: "build.json",
         source,
       });
+    },
+  };
+}
+
+/** GitHub Pages serves `404.html` for unknown paths under the site root (SPA deep links). */
+function emitSpa404Plugin(): Plugin {
+  return {
+    name: "stratum-spa-404",
+    closeBundle() {
+      const indexPath = path.resolve(__dirname, "dist/index.html");
+      const notFoundPath = path.resolve(__dirname, "dist/404.html");
+      if (existsSync(indexPath)) {
+        copyFileSync(indexPath, notFoundPath);
+      }
     },
   };
 }
@@ -92,7 +106,7 @@ export default defineConfig(({ mode }) => {
     __RELEASE_CHANGES_MD__: JSON.stringify(releaseChangesMd),
     __DEV_MODE__: JSON.stringify(devModeFromEnv(env)),
   },
-  plugins: [...devPlugins, modPackJsoncPlugin(), emitBuildJsonPlugin()],
+  plugins: [...devPlugins, modPackJsoncPlugin(), emitBuildJsonPlugin(), emitSpa404Plugin()],
   base: "/stratum/",
   // Console spam guard: keep source maps off so browsers/extensions don't try to
   // fetch original `.ts` sources in runtime environments that don't serve them.

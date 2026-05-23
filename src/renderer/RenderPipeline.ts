@@ -34,6 +34,7 @@ import { WeatherRainParticles } from "./WeatherRainParticles";
 import { WeatherSnowParticles } from "./WeatherSnowParticles";
 import { SpriteCloudLayer } from "./sky/SpriteCloudLayer";
 import { getVideoPrefs, type VideoPrefs } from "../ui/settings/videoPrefs";
+import { flushGpuBufferDestroysNow } from "./gpuBufferDestroyDeferral";
 
 /**
  * Named world layers (instances are created by {@link RenderPipeline}).
@@ -1192,6 +1193,7 @@ export class RenderPipeline implements RenderPipelineLayers {
   }
 
   destroy(): void {
+    flushGpuBufferDestroysNow();
     window.removeEventListener("resize", this.onWindowResize);
     document.removeEventListener("fullscreenchange", this.onFullscreenChange);
     document.removeEventListener("webkitfullscreenchange", this.onFullscreenChange);

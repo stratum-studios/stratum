@@ -173,10 +173,23 @@ function shrinkEmbedToBudget(
   return { title: t, description: d, fields: fs };
 }
 
+/** Discord rejects some payloads with NUL / C1 control chars in embed strings. */
+function stripDiscordText(s: string): string {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0 || (c >= 0x80 && c <= 0x9f)) {
+      continue;
+    }
+    out += s[i]!;
+  }
+  return out;
+}
+
 function sanitizeDiscordField(f: DiscordField): DiscordField {
-  const nameRaw = f.name.trim();
+  const nameRaw = stripDiscordText(f.name).trim();
   const name = nameRaw.length > 0 ? trunc(nameRaw, 256) : "Field";
-  let value = f.value;
+  let value = stripDiscordText(f.value);
   if (value.trim().length === 0) {
     value = "—";
   }
@@ -184,15 +197,8 @@ function sanitizeDiscordField(f: DiscordField): DiscordField {
   return { name, value, inline: f.inline };
 }
 
-function clampEmbedFields(
-  fields: DiscordField[],
-  max: number,
-): { fields: DiscordField[]; omitted: number } {
-  if (fields.length <= max) {
-    return { fields, omitted: 0 };
-  }
 function splitStackFields(stack: string): DiscordField[] {
-  const s = stack.trim();
+  const s = stripDiscordText(stack).trim();
   if (s === "") {
     return [];
   }
@@ -212,6 +218,34 @@ function splitStackFields(stack: string): DiscordField[] {
     part++;
   }
   return out;
+}
+
+function clampEmbedFields(
+  fields: DiscordField[],
+  max: number,
+): { fields: DiscordField[]; omitted: number } {
+  if (fields.length <= max) {
+    return { fields, omitted: 0 };
+  }
+  let stackStart = fields.length;
+  for (let i = 0; i < fields.length; i++) {
+    if (fields[i]!.name.startsWith("Stack")) {
+      stackStart = i;
+      break;
+    }
+  }
+  const stackBlock = stackStart < fields.length ? fields.slice(stackStart) : [];
+  const prefix = stackStart < fields.length ? fields.slice(0, stackStart) : fields;
+  if (stackBlock.length >= max) {
+    return {
+      fields: stackBlock.slice(0, max),
+      omitted: fields.length - max,
+    };
+  }
+  const room = max - stackBlock.length;
+  const prefixKept = room > 0 ? prefix.slice(0, room) : [];
+  const kept = [...prefixKept, ...stackBlock];
+  return { fields: kept, omitted: fields.length - kept.length };
 }
 
 function formatMods(mods: CrashReportPayload["mods"]): string {
@@ -471,9 +505,16 @@ serve(async (req) => {
     DISCORD_MAX_EMBED_FIELDS,
   );
   if (omitted > 0) {
-    const note = `\n\n_(Discord: ${omitted} embed field(s) truncated — stack shown first.)_`;
+    const note = `\n\n_(Discord: ${omitted} embed field(s) truncated — stack preserved.)_`;
     description = trunc(description + note, DISCORD_DESCRIPTION_MAX);
   }
+
+  title = trunc(
+    stripDiscordText(title).trim() ||
+      (isCrash ? "Crash (unknown)" : "Error (unknown)"),
+    DISCORD_TITLE_MAX,
+  );
+  description = trunc(stripDiscordText(description), DISCORD_DESCRIPTION_MAX);
 
   const discordBody = {
     username: isCrash ? "Stratum Crash Reporter" : "Stratum Error Reporter",

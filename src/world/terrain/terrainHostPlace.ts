@@ -42,6 +42,8 @@ export const SUB_BUCKET_FILL = 5;
 export const SUB_BG = 6;
 export const SUB_BED_PAIR = 7;
 export const SUB_PAINTING = 8;
+/** Right-click primed TNT: replace block with physics entity. */
+export const SUB_TNT_PRIME = 9;
 
 /** Bitmask for `TERRAIN_ACK.effects` on the wire. */
 export const ACK_TOOL_USE = 1;
@@ -736,6 +738,20 @@ export function tryHostTerrainPlace(
       return fail();
     }
     return { ok: true, effects: ACK_CONSUME_ONE };
+  }
+
+  if (subtype === SUB_TNT_PRIME) {
+    const cell = world.getBlock(wx, wy);
+    if (cell.identifier !== "stratum:tnt") {
+      return fail();
+    }
+    if (!world.setBlock(wx, wy, airId)) {
+      return fail();
+    }
+    const cx = (wx + 0.5) * BLOCK_SIZE;
+    const cy = (wy + 0.5) * BLOCK_SIZE;
+    world.spawnPrimedTnt(cx, cy, 0, 0);
+    return { ok: true, effects: 0 };
   }
 
   return fail();

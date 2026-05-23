@@ -557,13 +557,16 @@ export class AudioEngine {
    * Play one decoded buffer through the music gain. Stops any current music source.
    * @param onEnded Called when the buffer finishes (not when {@link stopMusic} runs).
    */
-  playMusicBuffer(buffer: AudioBuffer, onEnded?: () => void): void {
+  playMusicBuffer(buffer: AudioBuffer, onEnded?: () => void): boolean {
     this.stopMusic();
     const ctx = this.ensureContext();
-    void ctx.resume().catch(() => {});
+    // Respect autoplay policy: only start music when the context is already running.
+    if (ctx.state !== "running") {
+      return false;
+    }
     const g = this.musicGain;
     if (g === null) {
-      return;
+      return false;
     }
     const src = ctx.createBufferSource();
     src.buffer = buffer;
@@ -578,6 +581,7 @@ export class AudioEngine {
     };
     this.musicSource = src;
     src.start(0);
+    return true;
   }
 
   stopMusic(): void {

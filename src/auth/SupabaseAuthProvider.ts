@@ -22,6 +22,13 @@ function hasRecoveryTypeInUrl(): boolean {
   return fromHash === "recovery";
 }
 
+/** Where Supabase sends users after email confirm / password reset (must match Auth redirect URLs). */
+function getAuthRedirectTo(): string {
+  const base = import.meta.env.BASE_URL ?? "/";
+  const basePath = base.startsWith("/") ? base : `/${base}`;
+  return new URL(basePath, window.location.origin).toString();
+}
+
 function mapAuthError(err: unknown): string {
   if (err !== null && typeof err === "object" && "status" in err) {
     const status = (err as { status?: unknown }).status;
@@ -159,6 +166,9 @@ export class SupabaseAuthProvider implements IAuthProvider {
     const { error } = await this.client.auth.signUp({
       email: email.trim(),
       password,
+      options: {
+        emailRedirectTo: getAuthRedirectTo(),
+      },
     });
     if (error !== null) {
       return { ok: false, error: mapAuthError(error) };
@@ -173,11 +183,8 @@ export class SupabaseAuthProvider implements IAuthProvider {
     if (trimmed === "") {
       return { ok: false, error: "Enter your email first." };
     }
-    const base = import.meta.env.BASE_URL ?? "/";
-    const basePath = base.startsWith("/") ? base : `/${base}`;
-    const redirectTo = new URL(basePath, window.location.origin).toString();
     const { error } = await this.client.auth.resetPasswordForEmail(trimmed, {
-      redirectTo,
+      redirectTo: getAuthRedirectTo(),
     });
     if (error !== null) {
       return { ok: false, error: mapAuthError(error) };

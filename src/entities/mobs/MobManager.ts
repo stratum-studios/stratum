@@ -185,6 +185,12 @@ export type MobPublicView = Readonly<{
   slimeJumpPriming: boolean;
   /** Seconds left in death pose (`0` = not dying). */
   deathAnimRemainSec: number;
+  /** Slime only: items absorbed for replication (empty array when none). */
+  slimeStuckItems?: ReadonlyArray<{
+    itemId: ItemId;
+    count: number;
+    damage: number;
+  }>;
 }>;
 
 function toPublic(m: MobRecord): MobPublicView {
@@ -228,6 +234,14 @@ function toPublic(m: MobRecord): MobPublicView {
     slimeOnGround: m.kind === "slime" ? m.onGround : false,
     slimeJumpPriming: m.kind === "slime" ? m.slimeJumpPriming : false,
     deathAnimRemainSec: m.deathAnimRemainSec,
+    slimeStuckItems:
+      m.kind === "slime"
+        ? m.stuckItems.map((s) => ({
+            itemId: s.itemId,
+            count: s.count,
+            damage: s.damage,
+          }))
+        : undefined,
   };
 }
 
@@ -2422,7 +2436,13 @@ export class MobManager {
 
     for (const m of this.mobs.values()) {
       const pub = toPublic(m);
-      const sig = `${pub.x.toFixed(1)}|${pub.y.toFixed(1)}|${pub.vx.toFixed(1)}|${pub.vy.toFixed(1)}|${pub.hp}|${pub.facingRight ? 1 : 0}|${pub.panic ? 1 : 0}|${pub.hurt ? 1 : 0}|${pub.attacking ? 1 : 0}|${pub.burning ? 1 : 0}|${pub.woolColor}|${pub.deathAnimRemainSec.toFixed(2)}|${pub.walking ? 1 : 0}|${pub.slimeOnGround ? 1 : 0}|${pub.slimeJumpPriming ? 1 : 0}`;
+      const stuckSig =
+        pub.type === MobType.Slime
+          ? (pub.slimeStuckItems ?? [])
+              .map((s) => `${s.itemId}:${s.count}:${s.damage}`)
+              .join("|")
+          : "";
+      const sig = `${pub.x.toFixed(1)}|${pub.y.toFixed(1)}|${pub.vx.toFixed(1)}|${pub.vy.toFixed(1)}|${pub.hp}|${pub.facingRight ? 1 : 0}|${pub.panic ? 1 : 0}|${pub.hurt ? 1 : 0}|${pub.attacking ? 1 : 0}|${pub.burning ? 1 : 0}|${pub.woolColor}|${pub.deathAnimRemainSec.toFixed(2)}|${pub.walking ? 1 : 0}|${pub.slimeOnGround ? 1 : 0}|${pub.slimeJumpPriming ? 1 : 0}|${stuckSig}`;
       const prev = this.lastBroadcastSig.get(pub.id);
       if (force || prev !== sig) {
         this.lastBroadcastSig.set(pub.id, sig);
@@ -2721,7 +2741,14 @@ export class MobManager {
                   slimeJumpDir: 0,
                   slimeJumpCooldownRemainSec: 0,
                   slimeChaseInvertRemainSec: 0,
-                  stuckItems: [],
+                  stuckItems:
+                    v.slimeStuckItems !== undefined
+                      ? v.slimeStuckItems.map((s) => ({
+                          itemId: s.itemId,
+                          count: s.count,
+                          damage: s.damage,
+                        }))
+                      : [],
                 }
               : {
                   kind: "zombie",
@@ -2774,6 +2801,16 @@ export class MobManager {
       m.slimeColor = normalizeSlimeColor(v.woolColor);
       m.onGround = v.slimeOnGround;
       m.slimeJumpPriming = v.slimeJumpPriming;
+      if (v.slimeStuckItems !== undefined) {
+        m.stuckItems.length = 0;
+        for (const s of v.slimeStuckItems) {
+          m.stuckItems.push({
+            itemId: s.itemId,
+            count: s.count,
+            damage: s.damage,
+          });
+        }
+      }
     }
     if (m.kind === "sheep") {
       m.woolColor = v.woolColor;
@@ -2800,6 +2837,11 @@ export class MobManager {
     flags: number;
     woolColor?: number;
     deathAnim10Ms?: number;
+    slimeStuckItems?: ReadonlyArray<{
+      itemId: number;
+      count: number;
+      damage: number;
+    }>;
   }): void {
     const facingRight = (p.flags & 1) !== 0;
     const panic = (p.flags & 2) !== 0;
@@ -2836,6 +2878,15 @@ export class MobManager {
       deathAnimRemainSec,
       slimeOnGround,
       slimeJumpPriming,
+      ...(et === MobType.Slime && p.slimeStuckItems !== undefined
+        ? {
+            slimeStuckItems: p.slimeStuckItems.map((s) => ({
+              itemId: s.itemId as ItemId,
+              count: s.count,
+              damage: s.damage,
+            })),
+          }
+        : {}),
     });
   }
 

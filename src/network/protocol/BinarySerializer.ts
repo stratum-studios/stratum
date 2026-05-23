@@ -62,13 +62,13 @@ const CHUNK_SPAWNER_MAGIC = 0x57_50_53_53; // 'SSPW' LE
 const CHUNK_SIGN_MAGIC = 0x4e_47_53_53; // 'SSGN' LE
 
 /** Wire protocol version carried in handshake (this build). */
-export const WIRE_PROTOCOL_VERSION = 22;
+export const WIRE_PROTOCOL_VERSION = 23;
 /**
  * Oldest wire version this build still speaks. Bump when the binary layout breaks;
  * keep in sync with {@link WIRE_PROTOCOL_VERSION} when you drop old clients.
- * Handshake v17+ added `localGuestUuid`; v16 peers remain compatible.
+ * v23: slime stuck-items ENTITY_STATE tail, ARROW_MOB_STICK.
  */
-export const MIN_WIRE_PROTOCOL_VERSION = 16;
+export const MIN_WIRE_PROTOCOL_VERSION = 23;
 
 export function isWireVersionCompatible(peerVersion: number): boolean {
   return (

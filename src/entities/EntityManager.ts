@@ -164,7 +164,7 @@ import type { ItemRegistry } from "../items/ItemRegistry";
 import type { ArmorSlot } from "../items/PlayerInventory";
 import type { AtlasLoader } from "../renderer/AtlasLoader";
 import type { RenderPipeline } from "../renderer/RenderPipeline";
-import { getTorchBloomGradientTexture } from "../renderer/torchBloomGradientTexture";
+import { getTorchBloomSpriteTexture } from "../renderer/torchBloomGradientTexture";
 import { getVideoPrefs } from "../ui/settings/videoPrefs";
 import type { BlockRegistry } from "../world/blocks/BlockRegistry";
 import type { World } from "../world/World";
@@ -1332,6 +1332,9 @@ export class EntityManager {
   private readonly remoteArmorSprites = new Map<string, (Sprite | null)[]>();
   private readonly droppedSprites = new Map<string, Sprite>();
   private readonly arrowSprites = new Map<string, Sprite>();
+  /** Primed TNT body + fuse particle container (world px → Pixi). */
+  private readonly primedTntRoots = new Map<string, Container>();
+  private primedTntFusePhase = 0;
   private droppedBobPhase = 0;
   private mobManager: MobManager | null = null;
   private sheepWalkTextures: Texture[] | null = null;
@@ -2307,6 +2310,7 @@ export class EntityManager {
     this.syncAimGraphic(alpha);
     this.syncDroppedItems(dtSec);
     this.syncArrowSprites(dtSec);
+    this.syncPrimedTntSprites(dtSec);
     this.syncSheepSprites(dtSec);
     this.syncPigSprites(dtSec);
     this.syncDuckSprites(dtSec);
@@ -2366,6 +2370,62 @@ export class EntityManager {
       const ix = item.x;
       const iy = item.y + bob;
       sprite.position.set(ix, -iy);
+    }
+  }
+
+  private syncPrimedTntSprites(dtSec: number): void {
+    this.primedTntFusePhase += dtSec * 14;
+    const primed = this.world.getPrimedTnts();
+    const staleIds: string[] = [];
+    for (const id of this.primedTntRoots.keys()) {
+      if (!primed.has(id)) {
+        staleIds.push(id);
+      }
+    }
+    for (const id of staleIds) {
+      const c = this.primedTntRoots.get(id);
+      if (c !== undefined) {
+        c.parent?.removeChild(c);
+        c.destroy({ children: true });
+      }
+      this.primedTntRoots.delete(id);
+    }
+
+    const tntDef = this.itemRegistry.getByKey("stratum:tnt");
+    let bodyTex: Texture | null = null;
+    if (tntDef !== undefined) {
+      try {
+        bodyTex = this.itemTextureAtlas.getTexture(tntDef.textureName);
+      } catch {
+        bodyTex = null;
+      }
+    }
+
+    for (const [id, ent] of primed) {
+      let root = this.primedTntRoots.get(id);
+      if (root === undefined) {
+        const c = new Container();
+        c.label = `primedTnt:${id}`;
+        if (bodyTex !== null) {
+          const body = new Sprite(bodyTex);
+          body.anchor.set(0.5);
+          c.addChild(body);
+        }
+        const fuse = new Graphics();
+        fuse.circle(4, -14, 5);
+        fuse.fill({ color: 0xff9900, alpha: 0.95 });
+        fuse.label = "primedTntFuse";
+        c.addChild(fuse);
+        this.playerGraphic?.parent?.addChild(c);
+        this.primedTntRoots.set(id, c);
+        root = c;
+      }
+      root.position.set(ent.x, -ent.y);
+      const fuseG = root.children.find((ch) => ch.label === "primedTntFuse") as Graphics | undefined;
+      if (fuseG !== undefined) {
+        fuseG.alpha = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(this.primedTntFusePhase + id.length));
+      }
+      root.zIndex = 820;
     }
   }
 
@@ -3454,7 +3514,7 @@ export class EntityManager {
     }
     root.addChildAt(held, 0);
     this.localHeldItemSprite = held;
-    const heldBloom = new Sprite(getTorchBloomGradientTexture());
+    const heldBloom = new Sprite(getTorchBloomSpriteTexture());
     heldBloom.anchor.set(0.5);
     heldBloom.blendMode = "add";
     heldBloom.visible = false;
@@ -4983,6 +5043,11 @@ export class EntityManager {
       sprite.destroy();
     }
     this.arrowSprites.clear();
+    for (const c of this.primedTntRoots.values()) {
+      c.parent?.removeChild(c);
+      c.destroy({ children: true });
+    }
+    this.primedTntRoots.clear();
     for (const p of this.deathBits) {
       p.sprite.parent?.removeChild(p.sprite);
       p.sprite.destroy();

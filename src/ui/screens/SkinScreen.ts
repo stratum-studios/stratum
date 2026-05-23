@@ -439,6 +439,12 @@ function injectStyles(): void {
       height: 28px;
       border-radius: 8px;
     }
+    .skin-outline-swatches .skin-none-swatch-icon {
+      width: 100%;
+      height: 100%;
+      display: block;
+      pointer-events: none;
+    }
     .skin-card.skin-card--skel {
       cursor: default;
       pointer-events: none;
@@ -824,9 +830,11 @@ export function mountSkinScreen(
     if (outlineDonatorTier !== "none") {
       const offBtn = document.createElement("button");
       offBtn.type = "button";
-      offBtn.className = "mm-btn mm-btn-subtle stratum-cp-swatch stratum-cp-swatch--compact";
-      offBtn.textContent = "None";
+      offBtn.className = "stratum-cp-swatch stratum-cp-swatch--compact";
       offBtn.title = "No outline glow";
+      offBtn.setAttribute("aria-label", "No outline glow");
+      offBtn.innerHTML =
+        '<svg class="skin-none-swatch-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="1" y="1" width="18" height="18" rx="2.5" fill="none" stroke="#ff4d4f" stroke-width="2"/><path d="M2 18 L18 2" stroke="#ff4d4f" stroke-width="2.4" stroke-linecap="round"/></svg>';
       if (outlineColorHex.trim() === "") {
         offBtn.classList.add("stratum-cp-swatch--active");
       }
@@ -905,6 +913,27 @@ export function mountSkinScreen(
     const allowed = allowedPresetColorsForTier(outlineDonatorTier);
     nameColorSwatches.replaceChildren();
     const hexLower = nameColorHex.toLowerCase();
+
+    const noneBtn = document.createElement("button");
+    noneBtn.type = "button";
+    noneBtn.className = "stratum-cp-swatch stratum-cp-swatch--compact";
+    noneBtn.title = "None (white default)";
+    noneBtn.setAttribute("aria-label", "None (white default)");
+    noneBtn.innerHTML =
+      '<svg class="skin-none-swatch-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="1" y="1" width="18" height="18" rx="2.5" fill="none" stroke="#ff4d4f" stroke-width="2"/><path d="M2 18 L18 2" stroke="#ff4d4f" stroke-width="2.4" stroke-linecap="round"/></svg>';
+    if (hexLower === DEFAULT_PLAYER_NAME_COLOR_HEX.toLowerCase()) {
+      noneBtn.classList.add("stratum-cp-swatch--active");
+    }
+    noneBtn.addEventListener("click", () => {
+      void (async () => {
+        nameColorHex = DEFAULT_PLAYER_NAME_COLOR_HEX;
+        const cur = await store.loadPlayerSettings();
+        await store.savePlayerSettings({ ...cur, nameColorHex });
+        renderNameColorSwatches();
+        setFeedback("Nametag color reset to white.", "ok");
+      })();
+    });
+    nameColorSwatches.appendChild(noneBtn);
 
     for (const color of allowed) {
       const sw = document.createElement("button");

@@ -14,6 +14,7 @@ export type BlockMaterial =
   | "furnace"
   | "generic";
 
+  
 /** Shared block fields (no registry id) — used by JSON parsing and {@link BlockDefinition}. */
 export interface BlockDefinitionBase {
   identifier: string;

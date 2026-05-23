@@ -37,6 +37,9 @@ import {
   PLAYER_WIDTH,
   POINTER_MOVE_THROTTLE_MS,
   REACH_BLOCKS,
+  PRIMED_TNT_ENTITY_PUSH_PX,
+  PRIMED_TNT_HALF_EXTENT_PX,
+  PRIMED_TNT_PUNCH_IMPULSE_PX,
   RECIPE_STATION_CRAFTING_TABLE,
   RECIPE_STATION_FURNACE,
   RECIPE_STATION_STONECUTTER,
@@ -90,6 +93,8 @@ import {
   feetToScreenAABB,
   type PlayerState,
 } from "../entities/Player";
+import type { PrimedTnt } from "../entities/PrimedTnt";
+import { createAABB, overlaps } from "../entities/physics/AABB";
 import {
   clampItemThrowVelocity,
   getItemThrowUnitVectorFromFeet,
@@ -231,6 +236,7 @@ import {
   tryEnqueueFurnaceSmelt,
   validateFurnaceEnqueue,
 } from "../world/furnace/furnaceEnqueue";
+import { applyTntExplosionFromPrimed } from "../world/explosion/applyTntExplosion";
 import { removeFurnaceQueueEntriesForRecipe } from "../world/furnace/furnaceCancelQueuedRecipe";
 import { createEmptyFurnaceTileState } from "../world/furnace/FurnaceTileState";
 import { SmeltingRegistry } from "../world/SmeltingRegistry";
@@ -240,6 +246,8 @@ import {
   ENTITY_STATE_FLAG_SLIME_ON_GROUND,
   MsgType,
   PLAYER_SKIN_DATA_MAX_BYTES,
+  type DropDespawnMsg,
+  type DropSpawnMsg,
   type PlayerStateMsg,
   type PlayerStateRelayMsg,
 } from "../network/protocol/messages";
@@ -428,6 +436,9 @@ export class Game {
   }> = [];
   /** Joining client: pose packets received before `World` exists (see `_flushPendingRemotePlayerPackets`). */
   private readonly _pendingRemotePlayerPackets: PendingRemotePlayerPacket[] = [];
+  /** Joining client: drops received before `World` exists (flushed after `world.init`). */
+  private readonly _pendingDropSpawns: DropSpawnMsg[] = [];
+  private readonly _pendingDropDespawns: DropDespawnMsg[] = [];
   /** Client: host spawn assignment before local player is fully spawned. */
   private _pendingAssignedSpawn: { x: number; y: number } | null = null;
   /** Host: merge into world metadata on next save (logout positions). */
@@ -1163,6 +1174,7 @@ export class Game {
     );
     this._flushPendingAuthoritativeChunks();
     this._flushPendingRemotePlayerPackets();
+    this._flushPendingDrops();
 
     if (
       this.adapter.state.status === "connected" &&
@@ -1205,6 +1217,42 @@ export class Game {
             netId: p.netId,
           });
         }
+      });
+      world.setNetPrimedTntReplicationHooks({
+        spawn: (p) => {
+          if (this.adapter.state.status === "connected") {
+            this.adapter.broadcast({
+              type: MsgType.PRIMED_TNT_SPAWN,
+              netPrimedId: p.netPrimedId,
+              x: p.x,
+              y: p.y,
+              vx: p.vx,
+              vy: p.vy,
+              fuseRemainSec: p.fuseRemainSec,
+            });
+          }
+        },
+        sync: (p) => {
+          if (this.adapter.state.status === "connected") {
+            this.adapter.broadcast({
+              type: MsgType.PRIMED_TNT_SYNC,
+              netPrimedId: p.netPrimedId,
+              x: p.x,
+              y: p.y,
+              vx: p.vx,
+              vy: p.vy,
+              fuseRemainSec: p.fuseRemainSec,
+            });
+          }
+        },
+        despawn: (p) => {
+          if (this.adapter.state.status === "connected") {
+            this.adapter.broadcast({
+              type: MsgType.PRIMED_TNT_DESPAWN,
+              netPrimedId: p.netPrimedId,
+            });
+          }
+        },
       });
     }
 
@@ -1268,6 +1316,7 @@ export class Game {
     });
     entityManager.setLocalPlayerOutlineColorHex(this._localOutlineColorHex);
     this.entityManager = entityManager;
+    this._applySessionRosterCosmetics();
     entityManager.getPlayer().setGameMode(this._worldGameMode);
     this._mobManager = new MobManager(world, lootResolver, this.bus);
     entityManager.setMobManager(this._mobManager);
@@ -2426,8 +2475,26 @@ export class Game {
           }
           return;
         }
+        if (
+          msg.type === MsgType.DROP_SPAWN &&
+          stNet.status === "connected" &&
+          stNet.role === "client" &&
+          this.world === null
+        ) {
+          this._pendingDropSpawns.push(msg);
+          return;
+        }
         if (msg.type === MsgType.DROP_DESPAWN && this.world !== null) {
           this.world.removeAuthoritativeDropByNetId(msg.netId);
+          return;
+        }
+        if (
+          msg.type === MsgType.DROP_DESPAWN &&
+          stNet.status === "connected" &&
+          stNet.role === "client" &&
+          this.world === null
+        ) {
+          this._pendingDropDespawns.push(msg);
           return;
         }
         if (msg.type === MsgType.ENTITY_SPAWN && this._mobManager !== null) {
@@ -2467,6 +2534,7 @@ export class Game {
               flags: msg.flags,
               woolColor: msg.woolColor ?? 0,
               deathAnim10Ms: msg.deathAnim10Ms,
+              slimeStuckItems: msg.slimeStuckItems,
             });
           }
           return;
@@ -2632,6 +2700,74 @@ export class Game {
               shooterFeetX: msg.shooterFeetX,
             });
           }
+          return;
+        }
+        if (msg.type === MsgType.ARROW_MOB_STICK && this.world !== null) {
+          if (stNet.status === "connected" && stNet.role === "client") {
+            this.world.applyAuthoritativeArrowMobStick({
+              netArrowId: msg.netArrowId,
+              mobId: msg.mobId,
+              offsetX: msg.offsetX,
+              offsetY: msg.offsetY,
+              rotationRad: msg.rotationRad,
+              mobFacingRight: msg.mobFacingRight,
+            });
+          }
+          return;
+        }
+        if (msg.type === MsgType.PRIMED_TNT_SPAWN && this.world !== null) {
+          if (stNet.status === "connected" && stNet.role === "client") {
+            this.world.applyAuthoritativePrimedTntSpawn({
+              netPrimedId: msg.netPrimedId,
+              x: msg.x,
+              y: msg.y,
+              vx: msg.vx,
+              vy: msg.vy,
+              fuseRemainSec: msg.fuseRemainSec,
+            });
+          }
+          return;
+        }
+        if (msg.type === MsgType.PRIMED_TNT_SYNC && this.world !== null) {
+          if (stNet.status === "connected" && stNet.role === "client") {
+            this.world.applyAuthoritativePrimedTntSync({
+              netPrimedId: msg.netPrimedId,
+              x: msg.x,
+              y: msg.y,
+              vx: msg.vx,
+              vy: msg.vy,
+              fuseRemainSec: msg.fuseRemainSec,
+            });
+          }
+          return;
+        }
+        if (msg.type === MsgType.PRIMED_TNT_DESPAWN && this.world !== null) {
+          if (stNet.status === "connected" && stNet.role === "client") {
+            this.world.removeReplicatedPrimedTntClient(msg.netPrimedId);
+          }
+          return;
+        }
+        if (
+          msg.type === MsgType.TNT_PUNCH_REQUEST &&
+          stNet.status === "connected" &&
+          stNet.role === "host" &&
+          this.world !== null
+        ) {
+          const w = this.world;
+          const t = w.getPrimedTntByNetId(msg.netPrimedId);
+          if (t === undefined) {
+            return;
+          }
+          const twx = Math.floor(t.x / BLOCK_SIZE);
+          const twy = Math.floor(t.y / BLOCK_SIZE);
+          if (!this._terrainCellWithinReachForPeer(twx, twy, e.peerId)) {
+            return;
+          }
+          w.applyPrimedTntPunchImpulse(
+            msg.netPrimedId,
+            msg.dirX,
+            PRIMED_TNT_PUNCH_IMPULSE_PX,
+          );
           return;
         }
         if (
@@ -3478,6 +3614,57 @@ export class Game {
       }
     }
     this._pendingRemotePlayerPackets.length = 0;
+  }
+
+  private _flushPendingDrops(): void {
+    const w = this.world;
+    if (w === null) {
+      return;
+    }
+    if (this._pendingDropSpawns.length > 0) {
+      for (const msg of this._pendingDropSpawns) {
+        w.applyAuthoritativeDropSpawn({
+          netId: msg.netId,
+          itemId: msg.itemId,
+          count: msg.count,
+          x: msg.x,
+          y: msg.y,
+          vx: msg.vx,
+          vy: msg.vy,
+          damage: msg.damage,
+          pickupDelayMs: msg.pickupDelayMs,
+        });
+      }
+      this._pendingDropSpawns.length = 0;
+    }
+    if (this._pendingDropDespawns.length > 0) {
+      for (const msg of this._pendingDropDespawns) {
+        w.removeAuthoritativeDropByNetId(msg.netId);
+      }
+      this._pendingDropDespawns.length = 0;
+    }
+  }
+
+  /**
+   * If the roster arrives before `EntityManager` exists (host starting up while clients connect),
+   * apply the known cosmetics once the entity manager is ready.
+   */
+  private _applySessionRosterCosmetics(): void {
+    const em = this.entityManager;
+    if (em === null) {
+      return;
+    }
+    const localId = this.adapter.getLocalPeerId();
+    for (const [peerId, r] of this._sessionRoster) {
+      if (localId !== null && peerId === localId) {
+        em.setLocalPlayerOutlineColorHex(r.outlineColorHex ?? "");
+      } else {
+        em.setRemotePlayerOutlineColorHex(peerId, r.outlineColorHex ?? "");
+        if (r.skinId.trim() !== "") {
+          void em.loadRemoteSkinTextures(peerId, r.skinId.trim());
+        }
+      }
+    }
   }
 
   private _applyAssignedSpawn(x: number, y: number): void {
@@ -4955,6 +5142,145 @@ export class Game {
     return bestPeerId;
   }
 
+  private _onPrimedTntExploded(tnt: PrimedTnt): void {
+    const w = this.world;
+    const em = this.entityManager;
+    const mm = this._mobManager;
+    if (w === null || em === null) {
+      return;
+    }
+    applyTntExplosionFromPrimed(tnt, {
+      world: w,
+      registry: w.getRegistry(),
+      gameMode: this._worldGameMode,
+      rng: w.forkMobRng(),
+      localPlayerFeet: em.getPlayer().state.position,
+      remotePlayers: w.getRemotePlayers(),
+      mobManager: mm,
+      damageLocalPlayer: (d) => {
+        em.getPlayer().takeDamage(d);
+      },
+      damageRemotePlayerByPeerId: (peerId, dmg) => {
+        const st = this.adapter.state;
+        if (st.status === "connected" && st.role === "host") {
+          this.adapter.send(peerId, {
+            type: MsgType.PLAYER_DAMAGE_APPLIED,
+            damage: dmg,
+          });
+        }
+      },
+    });
+    this.audio?.playSfx("dig_stone", { volume: 0.55, pitchVariance: 40 });
+  }
+
+  private _resolvePrimedTntOverlaps(tnt: PrimedTnt, dt: number): void {
+    const w = this.world;
+    const em = this.entityManager;
+    const mm = this._mobManager;
+    if (w === null || em === null) {
+      return;
+    }
+    const half = PRIMED_TNT_HALF_EXTENT_PX;
+    const tAabb = createAABB(tnt.x - half, -(tnt.y + half), half * 2, half * 2);
+    const plAabb = feetToScreenAABB(em.getPlayer().state.position);
+    if (overlaps(tAabb, plAabb)) {
+      const dir = tnt.x >= em.getPlayer().state.position.x ? 1 : -1;
+      tnt.vx += dir * PRIMED_TNT_ENTITY_PUSH_PX * dt;
+    }
+    if (mm !== null) {
+      for (const m of mm.getAll()) {
+        const { w: mw, h: mh } = mobHitboxSizePx(m.kind);
+        const mobAabb = createAABB(
+          m.x - mw * 0.5 - 2,
+          -(m.y + mh) - 2,
+          mw + 4,
+          mh + 4,
+        );
+        if (overlaps(tAabb, mobAabb)) {
+          const dir = tnt.x >= m.x ? 1 : -1;
+          tnt.vx += dir * PRIMED_TNT_ENTITY_PUSH_PX * dt;
+        }
+      }
+    }
+  }
+
+  /**
+   * Returns true when a primed TNT was punched (consumes the melee click).
+   */
+  private _tryMeleePrimedTnt(
+    px: number,
+    py: number,
+    aimX: number,
+    aimYDisplay: number,
+  ): boolean {
+    const w = this.world;
+    const input = this.input;
+    const em = this.entityManager;
+    const st = this.adapter.state;
+    if (w === null || input === null || em === null) {
+      return false;
+    }
+    if (!input.isJustPressed("break") || input.isWorldInputBlocked()) {
+      return false;
+    }
+    const pcx = Math.floor(px / BLOCK_SIZE);
+    const pcy = Math.floor(py / BLOCK_SIZE);
+    const reachPx = REACH_BLOCKS * BLOCK_SIZE;
+    let best: { id: string; netId: number | null; d2: number } | null = null;
+    const half = PRIMED_TNT_HALF_EXTENT_PX;
+    const pad = 2;
+    for (const tnt of w.getPrimedTnts().values()) {
+      const mwx = Math.floor(tnt.x / BLOCK_SIZE);
+      const mwy = Math.floor(tnt.y / BLOCK_SIZE);
+      if (Math.max(Math.abs(pcx - mwx), Math.abs(pcy - mwy)) > REACH_BLOCKS) {
+        continue;
+      }
+      const left = tnt.x - half - pad;
+      const right = tnt.x + half + pad;
+      const top = -(tnt.y + half) - pad;
+      const bottom = -tnt.y + half + pad;
+      if (aimX < left || aimX > right || aimYDisplay < top || aimYDisplay > bottom) {
+        continue;
+      }
+      const cx = tnt.x;
+      const cyDisp = -tnt.y;
+      const d2 = (aimX - cx) ** 2 + (aimYDisplay - cyDisp) ** 2;
+      if (d2 > reachPx * reachPx) {
+        continue;
+      }
+      if (best === null || d2 < best.d2) {
+        best = { id: tnt.id, netId: tnt.netId, d2 };
+      }
+    }
+    if (best === null) {
+      return false;
+    }
+    const dirX = aimX >= px ? 1 : -1;
+    em.getPlayer().swingHand();
+    this.audio?.playSfx("tool_swing", {
+      volume: TOOL_SWING_SFX_VOLUME,
+      pitchVariance: TOOL_SWING_SFX_PITCH_VARIANCE_CENTS,
+    });
+    input.suppressBreakUntilMouseUp();
+    if (st.status === "connected" && st.role === "client" && best.netId !== null) {
+      const hid = st.lanHostPeerId;
+      if (hid !== null) {
+        this.adapter.send(hid as PeerId, {
+          type: MsgType.TNT_PUNCH_REQUEST,
+          netPrimedId: best.netId,
+          dirX,
+        });
+      }
+      return true;
+    }
+    if (best.netId !== null) {
+      w.applyPrimedTntPunchImpulse(best.netId, dirX, PRIMED_TNT_PUNCH_IMPULSE_PX);
+    } else {
+      w.punchPrimedTntByEntityId(best.id, dirX, PRIMED_TNT_PUNCH_IMPULSE_PX);
+    }
+    return true;
+  }
+
   private _maybeMeleeMob(): void {
     const mm = this._mobManager;
     const input = this.input;
@@ -4986,6 +5312,10 @@ export class Game {
     const mwx = Math.floor(aimX / BLOCK_SIZE);
     const mwy = Math.floor(aimPhysY / BLOCK_SIZE);
     if (Math.max(Math.abs(pcx - mwx), Math.abs(pcy - mwy)) > REACH_BLOCKS) {
+      return;
+    }
+
+    if (this._tryMeleePrimedTnt(px, py, aimX, aimY)) {
       return;
     }
 
@@ -8047,6 +8377,16 @@ export class Game {
       entityManager !== null
     ) {
       input.updateMouseWorldPos(pipeline.getCamera());
+      const pl0 = entityManager.getPlayer();
+      const pos0 = pl0.state.position;
+      input.pollGamepads(FIXED_TIMESTEP_SEC, {
+        paused: this.paused,
+        feetX: pos0.x,
+        feetY: pos0.y,
+        facingRight: pl0.state.facingRight,
+        sandbox: pl0.isSandboxMode(),
+      });
+      input.applyGamepadAimToMouseWorldPos(pos0.x, pos0.y);
 
       if (input.isJustPressed("toggleGpuDebug")) {
         this._gpuDebugHud?.toggle(pipeline);
@@ -8081,6 +8421,7 @@ export class Game {
       }
 
       if (this.paused) {
+        this.uiShell?.tickPauseGamepad(this.bus);
         input.postUpdate();
         return;
       }
@@ -8096,6 +8437,10 @@ export class Game {
         this.isInventoryOpen = !this.isInventoryOpen;
         this._applyInventoryPanelsOpen(this.isInventoryOpen);
         this._syncWorldInputBlocked();
+      }
+
+      if (this.isInventoryOpen) {
+        this.inventoryUI?.tickGamepadInventory(FIXED_TIMESTEP_SEC);
       }
 
       this._worldTime.tick(FIXED_TIMESTEP_MS);
@@ -8344,11 +8689,59 @@ export class Game {
               (mobId) => {
                 this.entityManager?.bumpMobHealthBar(mobId);
               },
+              dropNet.status === "connected" && dropNet.role === "host"
+                ? (p) => {
+                    this.adapter.broadcast({
+                      type: MsgType.ARROW_MOB_STICK,
+                      netArrowId: p.netArrowId,
+                      mobId: p.mobId,
+                      offsetX: p.offsetX,
+                      offsetY: p.offsetY,
+                      rotationRad: p.rotationRad,
+                      mobFacingRight: p.mobFacingRight,
+                    });
+                  }
+                : undefined,
             );
           });
         } else {
-          world.updateArrows(dtSec, null, undefined, undefined, undefined);
+          world.updateArrows(
+            dtSec,
+            null,
+            mm !== null
+              ? (mobId) => {
+                  const m = mm.getById(mobId);
+                  if (m === undefined) {
+                    return undefined;
+                  }
+                  return {
+                    x: m.x,
+                    y: m.y,
+                    tiltRad: mobDeathTipOverTiltRad(
+                      m.kind,
+                      m.facingRight,
+                      m.deathAnimRemainSec,
+                    ),
+                    facingRight: m.facingRight,
+                  };
+                }
+              : undefined,
+          );
         }
+      }
+
+      if (role === "offline" || role === "host") {
+        withPerfSpan("Game.fixedUpdate.primedTnt", () => {
+          world.updatePrimedTnt(
+            dtSec,
+            (tnt) => {
+              this._onPrimedTntExploded(tnt);
+            },
+            (tnt, dt) => {
+              this._resolvePrimedTntOverlaps(tnt, dt);
+            },
+          );
+        });
       }
 
       withPerfSpan("Game.fixedUpdate.droppedItems", () => {
@@ -8585,6 +8978,15 @@ export class Game {
                   255,
                   Math.max(0, Math.round(v.deathAnimRemainSec / 0.01)),
                 ),
+                ...(v.type === MobType.Slime
+                  ? {
+                      slimeStuckItems: (v.slimeStuckItems ?? []).map((s) => ({
+                        itemId: s.itemId,
+                        count: s.count,
+                        damage: s.damage,
+                      })),
+                    }
+                  : {}),
               });
             }
           }
@@ -8682,6 +9084,16 @@ export class Game {
           }
         }
         this._pendingBlockUpdates.length = 0;
+      }
+
+      if (this.isInventoryOpen && input.gamepadBackJustEdge) {
+        this.isInventoryOpen = false;
+        this._applyInventoryPanelsOpen(false);
+        this._syncWorldInputBlocked();
+      }
+
+      if (this._deathModalOpen) {
+        this.uiShell?.tickDeathGamepad(this.bus);
       }
 
       input.postUpdate();
@@ -9293,10 +9705,31 @@ export class Game {
           (player.state.position.x + PLAYER_WIDTH * 0.5) / BLOCK_SIZE;
         const playerCenterWy =
           (player.state.position.y + PLAYER_HEIGHT * 0.5) / BLOCK_SIZE;
+        const remoteFireflyAnchors: { wx: number; wy: number }[] = [];
+        for (const rp of this.world.getRemotePlayers().values()) {
+          if (rp.heldItemId !== torchId) {
+            continue;
+          }
+          const disp = rp.getDisplayPose(now);
+          dynamicLightEmitters.push({
+            worldBlockX: (disp.x + PLAYER_WIDTH * 0.5) / BLOCK_SIZE,
+            worldBlockY: (disp.y + PLAYER_HEIGHT * 0.5) / BLOCK_SIZE,
+            strength: Math.min(
+              1.15,
+              Math.max(0.5, TORCH_HELD_LIGHT_INTENSITY * 1.65),
+            ),
+            bloomTipShiftScale: 1,
+          });
+          remoteFireflyAnchors.push({
+            wx: (disp.x + PLAYER_WIDTH * 0.5) / BLOCK_SIZE,
+            wy: (disp.y + PLAYER_HEIGHT * 0.5) / BLOCK_SIZE,
+          });
+        }
         this.fireflyParticles?.collectDynamicLightEmitters(
           playerCenterWx,
           playerCenterWy,
           dynamicLightEmitters,
+          remoteFireflyAnchors.length > 0 ? remoteFireflyAnchors : undefined,
         );
         withPerfSpan("LightingComposer.update", () => {
           pipeline.lightingComposer.update(

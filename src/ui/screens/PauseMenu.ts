@@ -9,6 +9,11 @@ import type { IndexedDBStore } from "../../persistence/IndexedDBStore";
 import { stratumCoreTextureAssetUrl } from "../../core/textureManifest";
 import { blurFocusContainedBy } from "../blurOverlayFocus";
 import { mountSettingsPanel } from "../settings/mountSettingsPanel";
+import {
+  sampleGamepadMenuEdges,
+  tickGamepadRovingFocus,
+} from "../MenuGamepadNavigator";
+import { isDocumentFullscreen, toggleAppFullscreen } from "../fullscreenToggle";
 
 const PAUSE_STYLE_ID = "stratum-pause-styles";
 
@@ -279,6 +284,10 @@ export class PauseMenu {
   private mpBtn: HTMLButtonElement | null = null;
   private mpStatusEl: HTMLDivElement | null = null;
   private resumeBtn: HTMLButtonElement | null = null;
+  private paneSettingsEl: HTMLDivElement | null = null;
+  private backBtnEl: HTMLButtonElement | null = null;
+  private readonly pauseGameFocusIdx = { i: 0 };
+  private readonly pauseSettingsFocusIdx = { i: 0 };
 
   init(
     mount: HTMLElement,
@@ -337,6 +346,17 @@ export class PauseMenu {
     });
     this.resumeBtn = resumeBtn;
 
+    const fullscreenBtn = document.createElement("button");
+    fullscreenBtn.type = "button";
+    fullscreenBtn.className = "pm-btn pm-btn-secondary";
+    fullscreenBtn.textContent = "Fullscreen";
+    fullscreenBtn.addEventListener("click", () => {
+      void toggleAppFullscreen().catch(() => {
+        /* ignore unsupported environments */
+      });
+      fullscreenBtn.textContent = isDocumentFullscreen() ? "Exit fullscreen" : "Fullscreen";
+    });
+
     const saveBtn = document.createElement("button");
     saveBtn.type = "button";
     saveBtn.className = "pm-btn pm-btn-secondary";
@@ -367,6 +387,7 @@ export class PauseMenu {
     });
 
     actions.appendChild(resumeBtn);
+    actions.appendChild(fullscreenBtn);
     actions.appendChild(saveBtn);
     actions.appendChild(quitBtn);
     actions.appendChild(settingsBtn);
@@ -416,10 +437,12 @@ export class PauseMenu {
     backBtn.addEventListener("click", () => {
       setPauseView("game");
     });
+    this.backBtnEl = backBtn;
     settingsActions.appendChild(backBtn);
     const settingsHost = document.createElement("div");
     settingsHost.className = "mm-panel mm-settings-panel pm-settings-host";
     paneSettings.append(settingsActions, settingsHost);
+    this.paneSettingsEl = paneSettings;
 
     function setPauseView(which: "game" | "settings"): void {
       const gameOn = which === "game";
@@ -454,6 +477,28 @@ export class PauseMenu {
     }
 
     this._syncMultiplayerPanel();
+  }
+
+  tickGamepad(bus: EventBus): void {
+    const overlay = this.overlay;
+    if (overlay === null || !overlay.classList.contains("pm-overlay--open")) {
+      return;
+    }
+    const edges = sampleGamepadMenuEdges();
+    const settingsOn = this.paneSettingsEl?.classList.contains("pm-pane--active") === true;
+    if (settingsOn) {
+      if (edges.back) {
+        this.backBtnEl?.click();
+        return;
+      }
+      tickGamepadRovingFocus(overlay, this.pauseSettingsFocusIdx, edges);
+    } else {
+      if (edges.back) {
+        bus.emit({ type: "ui:close-pause" } satisfies GameEvent);
+        return;
+      }
+      tickGamepadRovingFocus(overlay, this.pauseGameFocusIdx, edges);
+    }
   }
 
   setOpen(open: boolean): void {

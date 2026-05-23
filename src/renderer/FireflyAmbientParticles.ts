@@ -394,6 +394,8 @@ export class FireflyAmbientParticles {
     viewCenterWorldBlockX: number,
     viewCenterWorldBlockY: number,
     out: DynamicLightEmitter[],
+    /** Optional extra world-block anchors (e.g. remote players): rank fireflies by distance to nearest anchor. */
+    extraViewAnchors?: ReadonlyArray<{ wx: number; wy: number }>,
   ): void {
     if (this.particles.length === 0) {
       return;
@@ -418,9 +420,20 @@ export class FireflyAmbientParticles {
       const wx =
         (p.x + FIREFLY_LIGHT_BLOOM_OFFSET_SCREEN_PX) / BLOCK_SIZE;
       const wy = -p.y / BLOCK_SIZE;
-      const dx = wx - viewCenterWorldBlockX;
-      const dy = wy - viewCenterWorldBlockY;
-      const d2 = dx * dx + dy * dy;
+      let d2a = wx - viewCenterWorldBlockX;
+      let d2b = wy - viewCenterWorldBlockY;
+      let d2 = d2a * d2a + d2b * d2b;
+      if (extraViewAnchors !== undefined) {
+        for (let a = 0; a < extraViewAnchors.length; a++) {
+          const anc = extraViewAnchors[a]!;
+          d2a = wx - anc.wx;
+          d2b = wy - anc.wy;
+          const da = d2a * d2a + d2b * d2b;
+          if (da < d2) {
+            d2 = da;
+          }
+        }
+      }
 
       if (bestD2.length < maxN) {
         let j = bestD2.length;

@@ -4,6 +4,8 @@ import { unixRandom01 } from "../core/unixRandom";
 import {
   ARROW_STUCK_COLLECT_SNAP_PX,
   BLOCK_SIZE,
+  PRIMED_TNT_FUSE_SEC,
+  PRIMED_TNT_WATER_DRIFT_MAX_PX,
   PLAYER_HEIGHT,
   CHEST_DOUBLE_SLOTS,
   CHEST_SINGLE_SLOTS,
@@ -18,6 +20,7 @@ import {
   STEP_INTERVAL,
   STREAM_CHUNK_HYSTERESIS_BLOCKS,
   WATER_FLOW_EVERY_N_TICKS,
+  WATER_MAX_FLOW,
   WORLDGEN_NO_COLLIDE,
   WORLDGEN_USE_WORKER,
   WORLD_Y_MAX,
@@ -92,12 +95,14 @@ import {
 import type { ParsedStructure } from "./structure/structureSchema";
 import type { StructureFeatureEntry } from "./structure/StructureRegistry";
 import { resimulateWaterFromSources, tickWaterFlow } from "./water/WaterSimulation";
+import { getWaterFlowLevel } from "./water/waterMetadata";
 import { createAABB, type AABB } from "../entities/physics/AABB";
 import { RemotePlayer } from "./entities/RemotePlayer";
 import {
   ArrowProjectile,
   type HostArrowStrikeResult,
 } from "../entities/ArrowProjectile";
+import { PrimedTnt } from "../entities/PrimedTnt";
 
 export type { HostArrowStrikeResult } from "../entities/ArrowProjectile";
 import { DroppedItem } from "../entities/DroppedItem";
@@ -323,6 +328,30 @@ export class World {
         shooterFeetX: number;
       }) => void)
     | null = null;
+  private readonly _primedTnt = new Map<string, PrimedTnt>();
+  private _primedTntSeq = 0;
+  private _nextNetPrimedTntId = 1;
+  private _netPrimedTntSpawnReplicate:
+    | ((p: {
+        netPrimedId: number;
+        x: number;
+        y: number;
+        vx: number;
+        vy: number;
+        fuseRemainSec: number;
+      }) => void)
+    | null = null;
+  private _netPrimedTntSyncReplicate:
+    | ((p: {
+        netPrimedId: number;
+        x: number;
+        y: number;
+        vx: number;
+        vy: number;
+        fuseRemainSec: number;
+      }) => void)
+    | null = null;
+  private _netPrimedTntDespawnReplicate: ((p: { netPrimedId: number }) => void) | null = null;
   /** Multiplayer client: pending pickup requests (avoid duplicate RPC). */
   private readonly _dropPickupPending = new Set<number>();
   /**
@@ -561,6 +590,226 @@ export class World {
     this._netArrowReplicate = hook;
   }
 
+  setNetPrimedTntReplicationHooks(
+    hooks: {
+      spawn:
+        | ((p: {
+            netPrimedId: number;
+            x: number;
+            y: number;
+            vx: number;
+            vy: number;
+            fuseRemainSec: number;
+          }) => void)
+        | null;
+      sync:
+        | ((p: {
+            netPrimedId: number;
+            x: number;
+            y: number;
+            vx: number;
+            vy: number;
+            fuseRemainSec: number;
+          }) => void)
+        | null;
+      despawn: ((p: { netPrimedId: number }) => void) | null;
+    } | null,
+  ): void {
+    if (hooks === null) {
+      this._netPrimedTntSpawnReplicate = null;
+      this._netPrimedTntSyncReplicate = null;
+      this._netPrimedTntDespawnReplicate = null;
+      return;
+    }
+    this._netPrimedTntSpawnReplicate = hooks.spawn;
+    this._netPrimedTntSyncReplicate = hooks.sync;
+    this._netPrimedTntDespawnReplicate = hooks.despawn;
+  }
+
+  /**
+   * Host/solo: spawn primed TNT at world-center coordinates (same convention as arrows / drops).
+   */
+  spawnPrimedTnt(
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+    fuseRemainSec = PRIMED_TNT_FUSE_SEC,
+  ): string {
+    let id: string;
+    let netId: number | null = null;
+    if (this._netPrimedTntSpawnReplicate !== null) {
+      netId = this._nextNetPrimedTntId++;
+      id = `pt${netId}`;
+      this._netPrimedTntSpawnReplicate({
+        netPrimedId: netId,
+        x,
+        y,
+        vx,
+        vy,
+        fuseRemainSec,
+      });
+    } else {
+      id = `primed-${++this._primedTntSeq}`;
+    }
+    this._primedTnt.set(id, new PrimedTnt(id, x, y, vx, vy, fuseRemainSec, netId));
+    return id;
+  }
+
+  /** Multiplayer client: host-authored spawn (`PRIMED_TNT_SPAWN`). */
+  applyAuthoritativePrimedTntSpawn(p: {
+    netPrimedId: number;
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    fuseRemainSec: number;
+  }): void {
+    const id = `pt${p.netPrimedId}`;
+    if (this._primedTnt.has(id)) {
+      return;
+    }
+    this._primedTnt.set(
+      id,
+      new PrimedTnt(
+        id,
+        p.x,
+        p.y,
+        p.vx,
+        p.vy,
+        p.fuseRemainSec,
+        p.netPrimedId,
+      ),
+    );
+  }
+
+  /** Multiplayer client: pose sync (`PRIMED_TNT_SYNC`). */
+  applyAuthoritativePrimedTntSync(p: {
+    netPrimedId: number;
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    fuseRemainSec: number;
+  }): void {
+    const id = `pt${p.netPrimedId}`;
+    const t = this._primedTnt.get(id);
+    if (t === undefined) {
+      return;
+    }
+    t.x = p.x;
+    t.y = p.y;
+    t.vx = p.vx;
+    t.vy = p.vy;
+    t.fuseRemainSec = p.fuseRemainSec;
+  }
+
+  removePrimedTntById(id: string): void {
+    const t = this._primedTnt.get(id);
+    this._primedTnt.delete(id);
+    if (t?.netId !== null && t?.netId !== undefined) {
+      this._netPrimedTntDespawnReplicate?.({ netPrimedId: t.netId });
+    }
+  }
+
+  getPrimedTntByNetId(netPrimedId: number): PrimedTnt | undefined {
+    return this._primedTnt.get(`pt${netPrimedId}`);
+  }
+
+  applyPrimedTntPunchImpulse(netPrimedId: number, dirX: number, impulsePx: number): boolean {
+    const t = this.getPrimedTntByNetId(netPrimedId);
+    if (t === undefined) {
+      return false;
+    }
+    const sx = dirX >= 0 ? 1 : -1;
+    t.vx += sx * impulsePx;
+    return true;
+  }
+
+  /** Solo/offline punch when entity has no replicated net id (`primed-*` ids). */
+  punchPrimedTntByEntityId(entityId: string, dirX: number, impulsePx: number): boolean {
+    const t = this._primedTnt.get(entityId);
+    if (t === undefined) {
+      return false;
+    }
+    const sx = dirX >= 0 ? 1 : -1;
+    t.vx += sx * impulsePx;
+    return true;
+  }
+
+  getPrimedTnts(): ReadonlyMap<string, PrimedTnt> {
+    return this._primedTnt;
+  }
+
+  clearAllPrimedTnt(): void {
+    this._primedTnt.clear();
+  }
+
+  /** Multiplayer client: remove replicated primed TNT after host `PRIMED_TNT_DESPAWN` (no host RPC). */
+  removeReplicatedPrimedTntClient(netPrimedId: number): void {
+    this._primedTnt.delete(`pt${netPrimedId}`);
+  }
+
+  /**
+   * Host/offline: advances physics and fuse; invokes `onExplode` before removing each entity whose fuse expired.
+   */
+  updatePrimedTnt(
+    dt: number,
+    onExplode: (tnt: PrimedTnt) => void,
+    resolveOverlaps?: (tnt: PrimedTnt, dtSec: number) => void,
+  ): void {
+    const waterId = this._waterBlockId;
+    for (const [id, tnt] of [...this._primedTnt.entries()]) {
+      if (waterId !== null) {
+        this.primedTntWaterDrift(tnt, dt, waterId);
+      }
+      tnt.tick(dt, this, this._dropSolidScratch);
+      resolveOverlaps?.(tnt, dt);
+      if (this._netPrimedTntSyncReplicate !== null && tnt.netId !== null) {
+        this._netPrimedTntSyncReplicate({
+          netPrimedId: tnt.netId,
+          x: tnt.x,
+          y: tnt.y,
+          vx: tnt.vx,
+          vy: tnt.vy,
+          fuseRemainSec: tnt.fuseRemainSec,
+        });
+      }
+      if (tnt.fuseRemainSec <= 0) {
+        this._primedTnt.delete(id);
+        if (tnt.netId !== null) {
+          this._netPrimedTntDespawnReplicate?.({ netPrimedId: tnt.netId });
+        }
+        onExplode(tnt);
+      }
+    }
+  }
+
+  private primedTntWaterDrift(tnt: PrimedTnt, dt: number, waterId: number): void {
+    const wx = Math.floor(tnt.x / BLOCK_SIZE);
+    const wy = Math.floor(tnt.y / BLOCK_SIZE);
+    if (this.getBlock(wx, wy).id !== waterId) {
+      return;
+    }
+    const lvHere = getWaterFlowLevel(this.getMetadata(wx, wy));
+    let push = 0;
+    const left = this.getBlock(wx - 1, wy);
+    const right = this.getBlock(wx + 1, wy);
+    if (left.id === waterId) {
+      push -= getWaterFlowLevel(this.getMetadata(wx - 1, wy)) - lvHere;
+    } else if (!left.solid || left.replaceable) {
+      push -= WATER_MAX_FLOW - lvHere;
+    }
+    if (right.id === waterId) {
+      push += getWaterFlowLevel(this.getMetadata(wx + 1, wy)) - lvHere;
+    } else if (!right.solid || right.replaceable) {
+      push += WATER_MAX_FLOW - lvHere;
+    }
+    const scale = Math.max(-1, Math.min(1, push / (WATER_MAX_FLOW * 2)));
+    tnt.vx += scale * PRIMED_TNT_WATER_DRIFT_MAX_PX * dt;
+    tnt.vy -= 420 * dt;
+  }
+
   /** Apply a host-authored drop on clients (`DROP_SPAWN`). */
   applyAuthoritativeDropSpawn(p: {
     netId: number;
@@ -635,6 +884,29 @@ export class World {
     this._arrows.set(
       id,
       new ArrowProjectile(id, p.x, p.y, p.vx, p.vy, dmg, p.shooterFeetX),
+    );
+  }
+
+  /** Client: host-authoritative mob embed for a replicated arrow (`a{id}`). */
+  applyAuthoritativeArrowMobStick(p: {
+    netArrowId: number;
+    mobId: number;
+    offsetX: number;
+    offsetY: number;
+    rotationRad: number;
+    mobFacingRight: boolean;
+  }): void {
+    const id = `a${p.netArrowId}`;
+    const arrow = this._arrows.get(id);
+    if (arrow === undefined || !arrow.isFlying()) {
+      return;
+    }
+    arrow.stickToMob(
+      p.mobId,
+      p.offsetX,
+      p.offsetY,
+      p.rotationRad,
+      p.mobFacingRight,
     );
   }
 
@@ -729,7 +1001,8 @@ export class World {
   }
 
   /**
-   * Sets the back-wall tile. Does not affect collision or light propagation.
+   * Sets the back-wall tile. Does not affect collision; skylight recomputes when the tile
+   * changes so glass back-walls can act as windows behind solid foreground.
    * Use block id 0 to clear.
    */
   setBackgroundBlock(wx: number, wy: number, id: number): boolean {
@@ -742,6 +1015,12 @@ export class World {
     const { lx, ly } = worldToLocalBlock(wx, wy);
     setBackground(chunk, lx, ly, id);
     this.emitBackgroundBlockChanged(wx, wy, oldBg, id);
+
+    if (oldBg !== id) {
+      const { cx, cy } = coord;
+      this._queueLightRecompute(cx, cy, LIGHT_RECOMPUTE_SKY);
+      this._queueLightRecomputeChunkNeighborsForPropagation(wx, wy, LIGHT_RECOMPUTE_SKY);
+    }
 
     if (id === 0 && oldBg !== 0) {
       const fg = this.getBlock(wx, wy);
@@ -1165,6 +1444,8 @@ export class World {
   /**
    * Spawns a dropped item stack at world pixel coordinates (Y up).
    * Optional `vx`/`vy`: horizontal (px/s, +right) and downward (px/s, +down) throw velocity.
+   * Multiplayer: when {@link setNetDropReplicationHook} is set (host), ids are `n{netId}` and
+   * `DROP_SPAWN` is broadcast; clients must not call this for guest-authored drops.
    */
   spawnItem(
     itemId: ItemId,
@@ -1356,6 +1637,15 @@ export class World {
     onArrowStuckBlock?: (worldX: number, worldY: number) => void,
     /** Host/solo: mob embed after damage (e.g. refresh local-only HP bar). */
     onArrowStickMob?: (mobId: number) => void,
+    /** Multiplayer host: broadcast mob embed for `a{netId}` arrows. */
+    onNetArrowMobStick?: (p: {
+      netArrowId: number;
+      mobId: number;
+      offsetX: number;
+      offsetY: number;
+      rotationRad: number;
+      mobFacingRight: boolean;
+    }) => void,
   ): void {
     if (mobFeetLookup !== undefined) {
       for (const [id, arrow] of [...this._arrows.entries()]) {
@@ -1411,6 +1701,23 @@ export class World {
                 feetNow.tiltRad,
                 feetNow.facingRight,
               );
+            }
+          }
+          if (
+            onNetArrowMobStick !== undefined &&
+            id.length > 1 &&
+            id.startsWith("a")
+          ) {
+            const netArrowId = Number.parseInt(id.slice(1), 10);
+            if (Number.isFinite(netArrowId)) {
+              onNetArrowMobStick({
+                netArrowId,
+                mobId: r.mobId,
+                offsetX: r.offsetX,
+                offsetY: r.offsetY,
+                rotationRad: r.rotationRad,
+                mobFacingRight: r.mobFacingRight,
+              });
             }
           }
         }
@@ -2745,7 +3052,11 @@ export class World {
    * change at (wx, wy). Previously only the seam column (`localX === 0` / `CHUNK_SIZE - 1`) was
    * enqueued; light reaches up to {@link LIGHT_CROSS_CHUNK_PAD} blocks across a boundary.
    */
-  private _queueLightRecomputeChunkNeighborsForPropagation(wx: number, wy: number): void {
+  private _queueLightRecomputeChunkNeighborsForPropagation(
+    wx: number,
+    wy: number,
+    mode: number = LIGHT_RECOMPUTE_BOTH,
+  ): void {
     const cx = Math.floor(wx / CHUNK_SIZE);
     const cy = Math.floor(wy / CHUNK_SIZE);
     const localX = ((wx % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
@@ -2753,16 +3064,16 @@ export class World {
     const pad = LIGHT_CROSS_CHUNK_PAD;
 
     for (let k = 1; localX + 1 + (k - 1) * CHUNK_SIZE <= pad; k += 1) {
-      this._queueLightRecompute(cx - k, cy, LIGHT_RECOMPUTE_BOTH);
+      this._queueLightRecompute(cx - k, cy, mode);
     }
     for (let k = 1; CHUNK_SIZE - localX + (k - 1) * CHUNK_SIZE <= pad; k += 1) {
-      this._queueLightRecompute(cx + k, cy, LIGHT_RECOMPUTE_BOTH);
+      this._queueLightRecompute(cx + k, cy, mode);
     }
     for (let k = 1; localY + 1 + (k - 1) * CHUNK_SIZE <= pad; k += 1) {
-      this._queueLightRecompute(cx, cy - k, LIGHT_RECOMPUTE_BOTH);
+      this._queueLightRecompute(cx, cy - k, mode);
     }
     for (let k = 1; CHUNK_SIZE - localY + (k - 1) * CHUNK_SIZE <= pad; k += 1) {
-      this._queueLightRecompute(cx, cy + k, LIGHT_RECOMPUTE_BOTH);
+      this._queueLightRecompute(cx, cy + k, mode);
     }
 
     const nearWest = localX < pad;
@@ -2770,16 +3081,16 @@ export class World {
     const nearNorth = localY < pad;
     const nearSouth = localY >= CHUNK_SIZE - pad;
     if (nearWest && nearNorth) {
-      this._queueLightRecompute(cx - 1, cy - 1, LIGHT_RECOMPUTE_BOTH);
+      this._queueLightRecompute(cx - 1, cy - 1, mode);
     }
     if (nearEast && nearNorth) {
-      this._queueLightRecompute(cx + 1, cy - 1, LIGHT_RECOMPUTE_BOTH);
+      this._queueLightRecompute(cx + 1, cy - 1, mode);
     }
     if (nearWest && nearSouth) {
-      this._queueLightRecompute(cx - 1, cy + 1, LIGHT_RECOMPUTE_BOTH);
+      this._queueLightRecompute(cx - 1, cy + 1, mode);
     }
     if (nearEast && nearSouth) {
-      this._queueLightRecompute(cx + 1, cy + 1, LIGHT_RECOMPUTE_BOTH);
+      this._queueLightRecompute(cx + 1, cy + 1, mode);
     }
   }
 
@@ -3100,6 +3411,7 @@ export class World {
     getBlockId(wx: number, wy: number): number;
     isSolid(wx: number, wy: number): boolean;
     getLightAbsorptionById(id: number, wx: number, wy: number): number;
+    getSkyLightAbsorptionById(id: number, wx: number, wy: number): number;
     getLightEmissionById(id: number): number;
     getSkyExposureTop(wx: number): number;
   } {
@@ -3124,6 +3436,22 @@ export class World {
       const ly = wy - cy * CHUNK_SIZE;
       return getBlock(chunk, lx, ly);
     };
+    const getBackgroundIdCached = (wx: number, wy: number): number => {
+      const cx = Math.floor(wx / CHUNK_SIZE);
+      const cy = Math.floor(wy / CHUNK_SIZE);
+      if (cx !== cachedCx || cy !== cachedCy) {
+        cachedCx = cx;
+        cachedCy = cy;
+        cachedChunk = this.chunks.getChunkXY(cx, cy);
+      }
+      const chunk = cachedChunk;
+      if (chunk === undefined) {
+        return 0;
+      }
+      const lx = wx - cx * CHUNK_SIZE;
+      const ly = wy - cy * CHUNK_SIZE;
+      return getBackground(chunk, lx, ly);
+    };
     return {
       getBlockId: (wx, wy) => getBlockIdCached(wx, wy),
       isSolid: (wx, wy) => this.getSolidById(getBlockIdCached(wx, wy)),
@@ -3132,6 +3460,19 @@ export class World {
         // Open doors (latched or proximity) pass light like air for BFS/occlusion.
         if (base > 0 && this.registry.isDoor(id) && this.isDoorEffectivelyOpen(wx, wy)) {
           return 0;
+        }
+        return base;
+      },
+      getSkyLightAbsorptionById: (id, wx, wy) => {
+        const base = this.getLightAbsorptionById(id);
+        if (base > 0 && this.registry.isDoor(id) && this.isDoorEffectivelyOpen(wx, wy)) {
+          return 0;
+        }
+        if (base > 0) {
+          const bgId = getBackgroundIdCached(wx, wy);
+          if (this.registry.backWallAllowsSkylightThroughSolidForeground(bgId)) {
+            return 0;
+          }
         }
         return base;
       },

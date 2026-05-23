@@ -222,12 +222,16 @@ export class OstPlaylistController {
       if (this.stopped || this.mode === null || token !== this.playToken) {
         return;
       }
-      this.audio.playMusicBuffer(buf, () => {
+      const started = this.audio.playMusicBuffer(buf, () => {
         if (this.stopped || this.mode === null || token !== this.playToken) {
           return;
         }
         this.scheduleNext(randomGapSec(this.gapMin, this.gapMax));
       });
+      if (!started && token === this.playToken && !this.stopped && this.mode !== null) {
+        // AudioContext is still blocked by autoplay policy; retry after a short delay.
+        this.scheduleNext(1.0);
+      }
     } finally {
       this.playOneTrackInFlight = false;
     }

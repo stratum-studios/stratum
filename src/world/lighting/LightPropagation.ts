@@ -13,6 +13,11 @@ interface WorldBlockReader {
   getBlockId(wx: number, wy: number): number;
   isSolid(wx: number, wy: number): boolean;
   getLightAbsorptionById(id: number, wx: number, wy: number): number;
+  /**
+   * Per-cell absorption for sky-light BFS only (may treat glass back-walls as windows).
+   * Block light uses {@link getLightAbsorptionById}.
+   */
+  getSkyLightAbsorptionById(id: number, wx: number, wy: number): number;
   getLightEmissionById(id: number): number;
   /** World Y of the highest solid block in column wx (or WORLD_Y_MIN if none). */
   getSkyExposureTop(wx: number): number;
@@ -62,7 +67,8 @@ const BLOCK_LIGHT_NB = [
  *  - Solid blocks absorb light (absorption field), preventing propagation
  *    through walls / ceilings.
  *
- * Result: sealed rooms get skyLight 0; open air stays at 15.
+ * Result: sealed rooms get skyLight 0 unless skylight reaches them through openings;
+ * a glass or empty back-wall tile behind an occluding foreground cell passes skylight like a window.
  */
 export function computeSkyLight(
   chunkX: number,
@@ -133,7 +139,7 @@ export function computeSkyLight(
     {
       const ny = wy - 1;
       const id = reader.getBlockId(wx, ny);
-      const absorption = reader.getLightAbsorptionById(id, wx, ny);
+      const absorption = reader.getSkyLightAbsorptionById(id, wx, ny);
       const next = level - absorption;
       if (next > 0) tryPush(wx, ny, Math.min(SKY_LIGHT_MAX, next));
     }
@@ -141,7 +147,7 @@ export function computeSkyLight(
     {
       const ny = wy + 1;
       const id = reader.getBlockId(wx, ny);
-      const absorption = reader.getLightAbsorptionById(id, wx, ny);
+      const absorption = reader.getSkyLightAbsorptionById(id, wx, ny);
       const next = level - 1 - absorption;
       if (next > 0) tryPush(wx, ny, Math.min(SKY_LIGHT_MAX, next));
     }
@@ -149,7 +155,7 @@ export function computeSkyLight(
     {
       const nx = wx - 1;
       const id = reader.getBlockId(nx, wy);
-      const absorption = reader.getLightAbsorptionById(id, nx, wy);
+      const absorption = reader.getSkyLightAbsorptionById(id, nx, wy);
       const next = level - 1 - absorption;
       if (next > 0) tryPush(nx, wy, Math.min(SKY_LIGHT_MAX, next));
     }
@@ -157,7 +163,7 @@ export function computeSkyLight(
     {
       const nx = wx + 1;
       const id = reader.getBlockId(nx, wy);
-      const absorption = reader.getLightAbsorptionById(id, nx, wy);
+      const absorption = reader.getSkyLightAbsorptionById(id, nx, wy);
       const next = level - 1 - absorption;
       if (next > 0) tryPush(nx, wy, Math.min(SKY_LIGHT_MAX, next));
     }

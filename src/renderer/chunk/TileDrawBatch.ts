@@ -23,6 +23,7 @@ import {
 import type { Chunk } from "../../world/chunk/Chunk";
 import { getBlock } from "../../world/chunk/Chunk";
 import { chunkToWorldOrigin, localIndex, worldToLocalBlock } from "../../world/chunk/ChunkCoord";
+import { getTorchBloomMeshUvs } from "../torchBloomGradientTexture";
 import type { World } from "../../world/World";
 import type { AtlasLoader } from "../AtlasLoader";
 import { chestVisualRole } from "../../world/chest/chestVisual";
@@ -1537,10 +1538,11 @@ export function buildTorchBloomUnderlayMesh(
         positions.push(x, y);
         uvs.push(u, v);
       };
-      pushVert(x0, y0, 0, 0);
-      pushVert(x1, y0, 1, 0);
-      pushVert(x0, y1, 0, 1);
-      pushVert(x1, y1, 1, 1);
+      const { u0, u1, v0, v1 } = getTorchBloomMeshUvs();
+      pushVert(x0, y0, u0, v0);
+      pushVert(x1, y0, u1, v0);
+      pushVert(x0, y1, u0, v1);
+      pushVert(x1, y1, u1, v1);
       indices.push(
         vertBase,
         vertBase + 1,
@@ -1564,7 +1566,8 @@ export function buildTorchBloomUnderlayMesh(
   const mesh = new Mesh({
     geometry,
     texture: bloomTexture,
-    roundPixels: true,
+    // Avoid 1px hairlines vs backdrop when clouds/sky vary; bloom is already soft in texture space.
+    roundPixels: false,
   });
   mesh.blendMode = "add";
   mesh.tint = 0xfff2dc;

@@ -1,4 +1,5 @@
 import { Mesh, MeshGeometry } from "pixi.js";
+import { deferGpuBufferDestroy } from "../gpuBufferDestroyDeferral";
 
 /**
  * Reuses existing {@link MeshGeometry} GPU buffers when vertex/index counts match the
@@ -22,10 +23,10 @@ export function assignMeshGeometryPreferReuse(mesh: Mesh, next: MeshGeometry): v
       return;
     }
   }
-  // Swap geometry first, then destroy the previous GPU buffers on a microtask so Pixi’s
-  // WebGPU encoder cannot still reference the old buffers in the same frame’s submit.
+  // Swap geometry first, then destroy previous GPU buffers after the next frame boundary
+  // (see gpuBufferDestroyDeferral — microtasks can race WebGPU submit).
   mesh.geometry = next as unknown as typeof mesh.geometry;
-  queueMicrotask(() => {
+  deferGpuBufferDestroy(() => {
     prev.destroy(true);
   });
 }

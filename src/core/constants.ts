@@ -563,7 +563,7 @@ export const FIREFLY_LIGHT_MAX_EMITTERS = 5;
 /** Relative strength for firefly lights in the placed-light path. */
 export const FIREFLY_LIGHT_STRENGTH = 0.42;
 /** Added to firefly world X (px) before bloom/placed-light worldBlockX; negative = left on screen. */
-export const FIREFLY_LIGHT_BLOOM_OFFSET_SCREEN_PX = -2;
+export const FIREFLY_LIGHT_BLOOM_OFFSET_SCREEN_PX = 0;
 
 /** Blocks per chunk edge (square chunks). */
 export const CHUNK_SIZE = 32;
@@ -762,8 +762,11 @@ export const PLACED_TORCH_RADIUS_BLOCKS = 14;
 /**
  * Torch flame in the 16×16 tile: center of the visible ~2×6 flame (pixels from the cell’s
  * top-left). Lighting/bloom use this so effects align with art instead of the block’s corner.
+ * Nudged slightly right of the 2px column center so additive underglow matches the sprite when
+ * the backdrop is mostly flat (Pixi {@link SpriteCloudLayer} dither + screen-blended strips add
+ * mid-frequency noise that can mask a small horizontal bias).
  */
-export const TORCH_FLAME_TIP_PX_X = 7.5;
+export const TORCH_FLAME_TIP_PX_X = 8.5;
 /** Nudged +6px vs atlas anchor so underglow matches the visible flame (Pixi y-down). */
 export const TORCH_FLAME_TIP_PX_Y = 7;
 /** Offset from integer block (wx, wy) to flame center in world block units (composite pass). */
@@ -812,6 +815,33 @@ export const ITEM_GRAVITY = 20;
 
 /** Dropped item max fall speed (blocks per second). */
 export const ITEM_MAX_FALL_SPEED = 15;
+
+/** Primed TNT fuse duration (Java Edition ~4 s). */
+export const PRIMED_TNT_FUSE_SEC = 4;
+
+/** Explosion radius in block cells (Chebyshev / diamond perimeter ~Java power 4 feel). */
+export const PRIMED_TNT_EXPLOSION_RADIUS_BLOCKS = 4;
+
+/** `p(drop) = 1 / (1 + k * hardness)` for explosion-decay style drops. */
+export const TNT_EXPLOSION_DROP_HARDNESS_K = 0.85;
+
+/** Entity damage at explosion center (scaled down with distance). */
+export const TNT_EXPLOSION_ENTITY_DAMAGE_MAX = 28;
+
+/** Horizontal impulse from punching primed TNT (world px/s). */
+export const PRIMED_TNT_PUNCH_IMPULSE_PX = 280;
+
+/** Half-extent inset so TNT doesn’t snag corners (world px). */
+export const PRIMED_TNT_COLLIDER_INSET_PX = 1.5;
+
+/** Max horizontal push from flowing water per second (world px/s added). */
+export const PRIMED_TNT_WATER_DRIFT_MAX_PX = 52;
+
+/** Horizontal overlap separation with players/mobs (world px/s impulse). */
+export const PRIMED_TNT_ENTITY_PUSH_PX = 140;
+
+/** Half-extent of primed TNT hitbox (world px). */
+export const PRIMED_TNT_HALF_EXTENT_PX = BLOCK_SIZE * 0.5 - PRIMED_TNT_COLLIDER_INSET_PX;
 
 /** Half-width of a dropped item hitbox in world pixels (matches 0.5× block sprite). */
 export const ITEM_HALF_EXTENT_PX = BLOCK_SIZE * 0.25;

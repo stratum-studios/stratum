@@ -42,6 +42,7 @@ import {
   mountReleaseChangesMarkdown,
   normalizeReleaseTypography,
 } from "../releaseChangesMarkdown";
+import { resetMainMenuGamepadFocusIndex, tickMainMenuGamepad } from "../MenuGamepadNavigator";
 
 export type MainMenuResult =
   | {
@@ -4279,6 +4280,7 @@ export class MainMenu {
       root.className = "mm-root";
 
       let onlinePollTimer: ReturnType<typeof setInterval> | null = null;
+      let menuGamepadRafId = 0;
       function clearOnlinePoll(): void {
         if (onlinePollTimer !== null) {
           clearInterval(onlinePollTimer);
@@ -5786,18 +5788,16 @@ export class MainMenu {
         let searchInputRef: HTMLInputElement | null = null;
         let filterSelRef: ReturnType<typeof createMenuDropdown> | null = null;
         let sortSelRef: ReturnType<typeof createMenuDropdown> | null = null;
+        let activeOnlineView: "list" | "detail" = "list";
+        let lastRenderedRooms: ListedRoom[] = [];
+        let lastRenderedRoomCodes = new Set<string>();
+        let detailRoomCode: string | null = null;
 
-        const loadRooms = async (): Promise<void> => {
+        const fetchRooms = async (): Promise<ListedRoom[]> => {
           const listEl = roomsListEl;
-          if (listEl === null || !listEl.isConnected) return;
+          if (listEl === null || !listEl.isConnected) return [];
           if (client === null) {
-            listEl.replaceChildren();
-            const empty = document.createElement("div");
-            empty.className = "mm-rooms-empty";
-            empty.textContent =
-              "Room list needs Supabase. Use “Join with code” to connect to a friend.";
-            listEl.appendChild(empty);
-            return;
+            return [];
           }
           const searchInput = searchInputRef;
           const filterSel = filterSelRef;
@@ -5808,24 +5808,41 @@ export class MainMenu {
             sortSel === null ||
             !searchInput.isConnected
           ) {
-            return;
+            return [];
           }
-          listEl.replaceChildren();
-          appendRoomsListSkeletonRows(listEl, 6);
-          const rows = await listStratumRooms(client, {
+          return await listStratumRooms(client, {
             search: searchInput.value.trim(),
             filter: filterSel.getValue() as "all" | "public" | "private",
             sort: sortSel.getValue() as "active" | "new" | "rating",
             limit: 50,
             offset: 0,
           });
+        };
+
+        const renderRoomsList = (rows: ListedRoom[], opts: { keepExistingIfEmpty?: boolean } = {}): void => {
           if (roomsListEl === null || !roomsListEl.isConnected) return;
+          if (client === null) {
+            roomsListEl.replaceChildren();
+            const empty = document.createElement("div");
+            empty.className = "mm-rooms-empty";
+            empty.textContent =
+              "Room list needs Supabase. Use “Join with code” to connect to a friend.";
+            roomsListEl.appendChild(empty);
+            lastRenderedRooms = [];
+            lastRenderedRoomCodes = new Set<string>();
+            return;
+          }
+          if (rows.length === 0 && opts.keepExistingIfEmpty === true) {
+            return;
+          }
           roomsListEl.replaceChildren();
           if (rows.length === 0) {
             const empty = document.createElement("div");
             empty.className = "mm-rooms-empty";
             empty.textContent = "No rooms match. Try another search or sort.";
             roomsListEl.appendChild(empty);
+            lastRenderedRooms = [];
+            lastRenderedRoomCodes = new Set<string>();
             return;
           }
           for (const r of rows) {
@@ -5855,11 +5872,45 @@ export class MainMenu {
             });
             roomsListEl.appendChild(row);
           }
+          lastRenderedRooms = rows.slice();
+          lastRenderedRoomCodes = new Set(rows.map((r) => r.room_code));
+        };
+
+        const loadRooms = async (mode: "manual" | "auto" = "manual"): Promise<void> => {
+          const listEl = roomsListEl;
+          if (listEl === null || !listEl.isConnected) return;
+          if (activeOnlineView !== "list") return;
+          if (mode === "manual") {
+            listEl.replaceChildren();
+            appendRoomsListSkeletonRows(listEl, 6);
+          }
+          const rows = await fetchRooms();
+          if (roomsListEl === null || !roomsListEl.isConnected) return;
+          if (mode === "manual") {
+            renderRoomsList(rows);
+            return;
+          }
+          // Auto-refresh: remove rooms that disappeared; don't add new ones or flash skeleton loaders.
+          const nextSet = new Set(rows.map((r) => r.room_code));
+          let removed = false;
+          for (const code of lastRenderedRoomCodes) {
+            if (!nextSet.has(code)) {
+              removed = true;
+              break;
+            }
+          }
+          if (!removed) {
+            return;
+          }
+          const filtered = lastRenderedRooms.filter((r) => nextSet.has(r.room_code));
+          renderRoomsList(filtered);
         };
 
         function showRoomDetail(room: ListedRoom): void {
           if (client === null) return;
           closeModal();
+          activeOnlineView = "detail";
+          detailRoomCode = room.room_code;
           backToRoomsBtn.style.display = "inline-flex";
           title.textContent = room.room_title;
 
@@ -6001,6 +6052,27 @@ export class MainMenu {
           footer.appendChild(joinBtn);
           bodyStage.appendChild(footer);
 
+          // Auto-refresh: if the room disappears, surface it (no skeleton, no list churn).
+          const checkRoomStillHosted = async (): Promise<void> => {
+            if (client === null) return;
+            if (activeOnlineView !== "detail") return;
+            if (detailRoomCode === null) return;
+            const rows = await listStratumRooms(client, {
+              search: "",
+              filter: "all",
+              sort: "active",
+              limit: 50,
+              offset: 0,
+            });
+            if (activeOnlineView !== "detail" || detailRoomCode === null) return;
+            const ok = rows.some((r) => r.room_code === detailRoomCode);
+            if (!ok) {
+              joinErr.textContent = "This room is no longer being hosted.";
+              joinBtn.disabled = true;
+            }
+          };
+          void checkRoomStillHosted();
+
           const refreshComments = async (): Promise<void> => {
             commentsList.replaceChildren();
             appendCommentThreadSkeletons(commentsList, 3);
@@ -6122,6 +6194,8 @@ export class MainMenu {
         function showRoomsList(): void {
           backToRoomsBtn.style.display = "none";
           title.textContent = "Rooms";
+          activeOnlineView = "list";
+          detailRoomCode = null;
           bodyStage.replaceChildren();
 
           const intro = document.createElement("p");
@@ -6222,7 +6296,7 @@ export class MainMenu {
 
         if (client !== null) {
           onlinePollTimer = setInterval(() => {
-            void loadRooms();
+            void loadRooms("auto");
           }, 12_000);
         }
 
@@ -6262,6 +6336,11 @@ export class MainMenu {
       // -- Cleanup -----------------------------------------------------------
       function cleanup(): void {
         clearOnlinePoll();
+        if (menuGamepadRafId !== 0) {
+          cancelAnimationFrame(menuGamepadRafId);
+          menuGamepadRafId = 0;
+          resetMainMenuGamepadFocusIndex();
+        }
         abortSettingsPanel();
         disposeWorkshop();
         disposeSkin();
@@ -6302,6 +6381,12 @@ export class MainMenu {
       root.appendChild(topbar);
       root.appendChild(body);
       mount.appendChild(root);
+
+      const tickMenuGamepadLoop = (): void => {
+        tickMainMenuGamepad(root);
+        menuGamepadRafId = requestAnimationFrame(tickMenuGamepadLoop);
+      };
+      menuGamepadRafId = requestAnimationFrame(tickMenuGamepadLoop);
 
       if (auth.hasPasswordRecoveryPending()) {
         setActiveTab("profile");
@@ -6515,6 +6600,15 @@ function appendWorldRowToList(
   }
   row.appendChild(thumbWrap);
   row.appendChild(info);
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `Play world: ${world.name}`);
+  row.addEventListener("keydown", (ev: KeyboardEvent) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      onSelect();
+    }
+  });
   if (edit !== undefined) {
     const editBtn = document.createElement("button");
     editBtn.type = "button";
